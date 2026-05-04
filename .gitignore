@@ -4,3 +4,6 @@ target
 # python
 __pycache__/
 .venv/
+
+# nix
+.direnv
