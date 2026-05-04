@@ -1,0 +1,6 @@
+[package]
+name = "cmsx-core"
+edition = "2024"
+version.workspace = true
+
+[dependencies]

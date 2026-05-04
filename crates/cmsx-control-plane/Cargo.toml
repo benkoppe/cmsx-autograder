@@ -1,0 +1,6 @@
+[package]
+name = "cmsx-control-plane"
+edition = "2024"
+version.workspace = true
+
+[dependencies]
