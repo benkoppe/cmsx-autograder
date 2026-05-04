@@ -604,6 +604,10 @@ Cancellation is needed for runaway jobs, excessive logs, stuck containers, admin
 
 ## Data Model
 
+Generated internal entity IDs should use UUID v7 by default. The system is append-heavy and time-oriented, so time-sortable UUIDs improve index locality and make recent submissions, jobs, events, and results easier to inspect without introducing a central sequence generator.
+
+UUID v7 ordering is a convenience, not the source of truth for time. Models should still store explicit timestamp fields such as `created_at`, `received_at`, `queued_at`, and event `timestamp`. Job events should also keep a per-job monotonic `sequence`, and event replay should order by `(job_id, sequence)` rather than relying on UUID order.
+
 The core data model should include:
 
 ```text
