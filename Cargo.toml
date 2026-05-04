@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/cmsx-control-plane", "crates/cmsx-core"]
+metadata.crane.name = "cmsx-autograder"
 
 [workspace.package]
 version = "0.1.0"
