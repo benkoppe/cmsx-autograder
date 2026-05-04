@@ -25,6 +25,7 @@
       imports = [
         inputs.pre-commit-hooks.flakeModule
         ./flake-parts/cargo.nix
+        ./flake-parts/cmsx-db-tools.nix
         ./flake-parts/devshell.nix
         ./flake-parts/git-hooks.nix
       ];

@@ -10,6 +10,12 @@ _: {
         hooks = {
           nixfmt.enable = true;
           rustfmt.enable = true;
+
+          sqlx-prepare = {
+            enable = false;
+            entry = "cargo sqlx prepare --workspace --check -- --all-targets";
+            pass_filenames = false;
+          };
         };
       };
     };

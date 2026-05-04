@@ -35,7 +35,12 @@
       ];
 
       devPackages =
-        rustDevPackages ++ pythonDevPackages ++ dataDevPackages ++ nixDevPackages ++ platformPackages;
+        rustDevPackages
+        ++ pythonDevPackages
+        ++ dataDevPackages
+        ++ nixDevPackages
+        ++ config.cmsx-db.devShellPackages
+        ++ platformPackages;
     in
     {
       devShells.default = craneLib.devShell {
@@ -43,6 +48,7 @@
         packages = devPackages;
 
         shellHook = ''
+          ${config.cmsx-db.installationScript}
           ${config.pre-commit.installationScript}
         '';
       };
