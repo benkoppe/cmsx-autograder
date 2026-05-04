@@ -74,6 +74,18 @@ Job logs and status events are core data, not a UI afterthought. The worker shou
 
 Trust boundaries should be explicit. A worker using the Docker socket is trusted infrastructure with powerful host access. Job containers should be the initial isolation boundary for grader and student code, and they must not receive the Docker socket or control-plane credentials.
 
+## Implementation Languages
+
+The core control plane and worker should be written in Rust unless a later implementation decision deliberately chooses otherwise. Rust fits the long-running infrastructure parts of the system: typed job/result/event models, worker orchestration, executor interfaces, Docker API integration, timeout handling, cancellation, cleanup, and future Firecracker or other VM lifecycle management.
+
+Rust should not leak into the instructor-facing grading model. Instructors should write Python `grade.py` scripts using the grader SDK, regardless of whether the submitted student code is Python, C, Java, Node, or another language.
+
+Python should be used for the grader authoring surface, the grader SDK, and optional grading helper libraries such as PDF parsing, structured file checks, subprocess helpers, and result construction.
+
+Nix should be used for reproducible builds and environments: worker images, runner OCI images, dependency-pinned language/toolchain environments, development shells, and future Firecracker root filesystems or VM images.
+
+TypeScript should be reserved for the future web UI and browser-facing code. The web UI should be built around the stable control plane APIs rather than driving the core architecture.
+
 ## CMSX Integration
 
 Each assignment has a unique CMSX webhook URL, for example:
