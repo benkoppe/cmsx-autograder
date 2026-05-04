@@ -1,7 +1,7 @@
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE assignments (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL PRIMARY KEY,
   slug TEXT NOT NULL,
   name TEXT NOT NULL,
   cmsx_assignment_id TEXT NOT NULL,
@@ -16,7 +16,7 @@ CREATE TABLE assignments (
 CREATE UNIQUE INDEX idx_assignments_slug ON assignments(slug);
 
 CREATE TABLE assignment_tokens (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL PRIMARY KEY,
   assignment_id TEXT NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
   token_hash TEXT NOT NULL,
   created_at TEXT NOT NULL,
@@ -27,7 +27,7 @@ CREATE INDEX idx_assignment_tokens_assignment_id
 ON assignment_tokens(assignment_id);
 
 CREATE TABLE submissions (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL PRIMARY KEY,
   assignment_id TEXT NOT NULL REFERENCES assignments(id) ON DELETE RESTRICT,
   cmsx_assignment_id TEXT NOT NULL,
   cmsx_assignment_name TEXT NOT NULL,
@@ -40,7 +40,7 @@ CREATE INDEX idx_submissions_assignment_received
 ON submissions(assignment_id, received_at);
 
 CREATE TABLE submission_files (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL PRIMARY KEY,
   submission_id TEXT NOT NULL REFERENCES submissions(id) ON DELETE CASCADE,
   problem_name TEXT,
   cmsx_file_field_name TEXT NOT NULL,
@@ -55,7 +55,7 @@ CREATE INDEX idx_submission_files_submission_id
 ON submission_files(submission_id);
 
 CREATE TABLE grading_jobs (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL PRIMARY KEY,
   submission_id TEXT NOT NULL REFERENCES submissions(id) ON DELETE CASCADE,
   assignment_id TEXT NOT NULL REFERENCES assignments(id) ON DELETE RESTRICT,
   status TEXT NOT NULL CHECK (
@@ -80,7 +80,7 @@ CREATE INDEX idx_grading_jobs_assignment_id
 ON grading_jobs(assignment_id);
 
 CREATE TABLE grading_results (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL PRIMARY KEY,
   job_id TEXT NOT NULL REFERENCES grading_jobs(id) ON DELETE CASCADE,
   status TEXT NOT NULL CHECK (
     status IN ('passed', 'failed', 'error', 'cancelled')
@@ -100,7 +100,7 @@ CREATE UNIQUE INDEX idx_grading_results_job_id
 ON grading_results(job_id);
 
 CREATE TABLE job_events (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL PRIMARY KEY,
   job_id TEXT NOT NULL REFERENCES grading_jobs(id) ON DELETE CASCADE,
   sequence INTEGER NOT NULL CHECK (sequence >= 0),
   timestamp TEXT NOT NULL,
