@@ -1,21 +1,11 @@
 use anyhow::{Context, Result};
 use jwt_simple::prelude::*;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-const WORKER_AUDIENCE: &str = "cmsx-control-plane";
+use cmsx_core::WorkerAuthClaims;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkerClaims {
-    iss: String,
-    sub: Uuid,
-    aud: String,
-    jti: Uuid,
-    method: String,
-    path: String,
-    body_sha256: String,
-}
+const WORKER_AUDIENCE: &str = "cmsx-control-plane";
 
 #[derive(Clone)]
 pub struct WorkerSigner {
@@ -33,7 +23,7 @@ impl WorkerSigner {
 
     pub fn authorization_header(&self, method: &str, path: &str, body: &[u8]) -> Result<String> {
         let body_sha256 = hex::encode(Sha256::digest(body));
-        let custom = WorkerClaims {
+        let custom = WorkerAuthClaims {
             iss: format!("worker:{}", self.worker_id),
             sub: self.worker_id,
             aud: WORKER_AUDIENCE.to_string(),

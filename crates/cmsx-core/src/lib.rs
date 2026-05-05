@@ -32,6 +32,7 @@ pub struct GradingJob {
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
     Queued,
+    Claimed,
     Running,
     Succeeded,
     Failed,

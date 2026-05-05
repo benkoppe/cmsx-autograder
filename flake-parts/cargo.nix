@@ -24,6 +24,7 @@
         strictDeps = true;
 
         nativeBuildInputs = [
+          pkgs.cmake
           pkgs.pkg-config
           pkgs.postgresql
         ]

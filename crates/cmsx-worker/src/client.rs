@@ -3,8 +3,8 @@ use reqwest::Client;
 use serde::{Serialize, de::DeserializeOwned};
 
 use cmsx_core::{
-    ClaimJobRequest, ClaimJobResponse, JobEventBatchRequest, JobFailureRequest, JobResultRequest,
-    WorkerHeartbeatRequest, WorkerHeartbeatResponse,
+    ClaimJobRequest, ClaimJobResponse, ClaimedJob, JobEventBatchRequest, JobFailureRequest,
+    JobResultRequest, WorkerHeartbeatRequest, WorkerHeartbeatResponse,
 };
 
 use crate::auth::WorkerSigner;
@@ -36,6 +36,10 @@ impl ControlPlaneClient {
         self.post_json("/workers/jobs/claim", request).await
     }
 
+    pub async fn get_job(&self, job_id: uuid::Uuid) -> Result<ClaimedJob> {
+        self.get_json(&format!("/workers/jobs/{job_id}")).await
+    }
+
     pub async fn post_events(
         &self,
         job_id: uuid::Uuid,
@@ -53,6 +57,25 @@ impl ControlPlaneClient {
     pub async fn post_failed(&self, job_id: uuid::Uuid, request: &JobFailureRequest) -> Result<()> {
         self.post_empty(&format!("/workers/jobs/{job_id}/failed"), request)
             .await
+    }
+
+    async fn get_json<R>(&self, path: &str) -> Result<R>
+    where
+        R: DeserializeOwned,
+    {
+        let auth = self.signer.authorization_header("GET", path, &[])?;
+
+        let response = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header(reqwest::header::AUTHORIZATION, auth)
+            .send()
+            .await
+            .context("request failed")?
+            .error_for_status()
+            .context("control plane returned error")?;
+
+        response.json().await.context("failed to decode response")
     }
 
     async fn post_json<T, R>(&self, path: &str, value: &T) -> Result<R>

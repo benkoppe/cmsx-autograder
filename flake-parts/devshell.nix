@@ -16,6 +16,7 @@
         pkgs.cargo-nextest
         pkgs.cargo-udeps
         pkgs.clippy
+        pkgs.cmake
         pkgs.rust-analyzer
         pkgs.rustc
         pkgs.rustfmt

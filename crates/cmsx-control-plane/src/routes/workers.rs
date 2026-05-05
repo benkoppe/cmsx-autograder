@@ -15,12 +15,16 @@ use uuid::Uuid;
 
 use cmsx_core::{
     ClaimJobRequest, ClaimJobResponse, ClaimedJob, ClaimedJobFile, JobEventBatchRequest,
-    JobFailureRequest, JobResultRequest, WorkerHeartbeatRequest, WorkerHeartbeatResponse,
+    JobFailureRequest, JobResultRequest, WorkerAuthClaims, WorkerHeartbeatRequest,
+    WorkerHeartbeatResponse,
 };
 
 use crate::{app::AppState, error::ApiError};
 
 const WORKER_REQUEST_MAX_BYTES: usize = 1024 * 1024;
+const WORKER_EVENT_BATCH_MAX_EVENTS: usize = 512;
+const WORKER_EVENT_MESSAGE_MAX_BYTES: usize = 64 * 1024;
+
 const WORKER_AUDIENCE: &str = "cmsx-control-plane";
 const LEASE_SECONDS: i64 = 60;
 
@@ -68,6 +72,10 @@ where
             .await
             .map_err(ApiError::internal)?;
 
+        if body.len() > WORKER_REQUEST_MAX_BYTES {
+            return Err(ApiError::payload_too_large("worker request body too large"));
+        }
+
         let worker = authenticate_worker(&app_state, &method, &path, &headers, &body).await?;
         let value =
             serde_json::from_slice(&body).map_err(|_| ApiError::bad_request("invalid json"))?;
@@ -102,24 +110,13 @@ fn worker_token_from_headers(headers: &HeaderMap) -> Result<&str, ApiError> {
         .ok_or_else(|| ApiError::unauthorized("invalid worker authorization scheme"))
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct WorkerClaims {
-    iss: String,
-    sub: Uuid,
-    aud: String,
-    jti: Uuid,
-    method: String,
-    path: String,
-    body_sha256: String,
-}
-
 async fn verify_worker_jwt(
     state: &AppState,
     token: &str,
     method: &str,
     path: &str,
     body_sha256: &str,
-) -> Result<WorkerClaims, ApiError> {
+) -> Result<WorkerAuthClaims, ApiError> {
     let metadata = Token::decode_metadata(token)
         .map_err(|_| ApiError::unauthorized("invalid worker token"))?;
 
@@ -157,7 +154,7 @@ async fn verify_worker_jwt(
             ..Default::default()
         };
 
-        let Ok(claims) = public_key.verify_token::<WorkerClaims>(token, Some(options)) else {
+        let Ok(claims) = public_key.verify_token::<WorkerAuthClaims>(token, Some(options)) else {
             continue;
         };
 
@@ -193,6 +190,8 @@ pub async fn heartbeat(
     WorkerJson { worker, value }: WorkerJson<WorkerHeartbeatRequest>,
 ) -> Result<Json<WorkerHeartbeatResponse>, ApiError> {
     let now = Utc::now();
+
+    validate_heartbeat_request(&value)?;
 
     let mut tx = state.db.begin().await.map_err(ApiError::internal)?;
 
@@ -240,21 +239,25 @@ pub async fn heartbeat(
     .await
     .map_err(ApiError::internal)?;
 
-    sqlx::query!(
-        r#"
-        UPDATE grading_jobs
-        SET lease_expires_at = $2,
-            last_heartbeat_at = $3
-        WHERE worker_id = $1
-          AND status IN ('claimed', 'running')
+    if !value.claimed_job_ids.is_empty() {
+        sqlx::query!(
+            r#"
+            UPDATE grading_jobs
+            SET lease_expires_at = $3,
+                last_heartbeat_at = $4
+            WHERE worker_id = $1
+              AND id = ANY($2)
+              AND status IN ('claimed', 'running')
         "#,
-        worker.id,
-        now + Duration::seconds(LEASE_SECONDS),
-        now
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(ApiError::internal)?;
+            worker.id,
+            &value.claimed_job_ids,
+            now + Duration::seconds(LEASE_SECONDS),
+            now
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(ApiError::internal)?;
+    }
 
     let cancelled = sqlx::query_scalar!(
         r#"
@@ -283,6 +286,8 @@ pub async fn claim_job(
     State(state): State<AppState>,
     WorkerJson { worker, value }: WorkerJson<ClaimJobRequest>,
 ) -> Result<Json<ClaimJobResponse>, ApiError> {
+    validate_claim_request(&value)?;
+
     if value.available_slots <= 0 {
         return Ok(Json(ClaimJobResponse { jobs: Vec::new() }));
     }
@@ -472,12 +477,13 @@ pub async fn post_events(
     Path(job_id): Path<Uuid>,
     WorkerJson { worker, value }: WorkerJson<JobEventBatchRequest>,
 ) -> Result<StatusCode, ApiError> {
-    ensure_job_owner(&state, worker.id, job_id).await?;
+    validate_event_batch(&value)?;
+    ensure_active_job_owner(&state, worker.id, job_id).await?;
 
     let mut tx = state.db.begin().await.map_err(ApiError::internal)?;
 
     for event in value.events {
-        sqlx::query!(
+        let result = sqlx::query!(
             r#"
             INSERT INTO job_events (
                 id, job_id, sequence, timestamp, type, stream, visibility, message, data
@@ -495,8 +501,15 @@ pub async fn post_events(
             SqlxJson(event.data) as _
         )
         .execute(&mut *tx)
-        .await
-        .map_err(ApiError::internal)?;
+        .await;
+
+        if let Err(error) = result {
+            if is_unique_violation(&error) {
+                return Err(ApiError::bad_request("duplicate event sequence"));
+            }
+
+            return Err(ApiError::internal(error));
+        }
     }
 
     tx.commit().await.map_err(ApiError::internal)?;
@@ -504,22 +517,64 @@ pub async fn post_events(
     Ok(StatusCode::NO_CONTENT)
 }
 
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    let Some(db_error) = error.as_database_error() else {
+        return false;
+    };
+
+    db_error.code().as_deref() == Some("23505")
+}
+
 pub async fn post_result(
     State(state): State<AppState>,
     Path(job_id): Path<Uuid>,
     WorkerJson { worker, value }: WorkerJson<JobResultRequest>,
 ) -> Result<StatusCode, ApiError> {
-    ensure_job_owner(&state, worker.id, job_id).await?;
-
     let now = Utc::now();
-    let status = match value.result.status {
+
+    let result_status = match value.result.status {
+        cmsx_core::ResultStatus::Passed => "passed",
+        cmsx_core::ResultStatus::Failed => "failed",
+        cmsx_core::ResultStatus::Error => "error",
+        cmsx_core::ResultStatus::Cancelled => "cancelled",
+    };
+
+    let job_status = match value.result.status {
         cmsx_core::ResultStatus::Passed => "succeeded",
         cmsx_core::ResultStatus::Failed => "failed",
         cmsx_core::ResultStatus::Error => "error",
         cmsx_core::ResultStatus::Cancelled => "cancelled",
     };
 
+    let result_json = serde_json::to_value(&value.result).map_err(ApiError::internal)?;
+    let tests_json = serde_json::to_value(&value.result.tests).map_err(ApiError::internal)?;
+    let feedback = value.result.feedback.clone();
+
     let mut tx = state.db.begin().await.map_err(ApiError::internal)?;
+
+    let update = sqlx::query!(
+        r#"
+        UPDATE grading_jobs
+        SET status = $3,
+            finished_at = $4,
+            lease_expires_at = NULL
+        WHERE id = $1
+          AND worker_id = $2
+          AND status IN ('claimed', 'running')
+          AND lease_expires_at > $4
+        "#,
+        job_id,
+        worker.id,
+        job_status,
+        now
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(ApiError::internal)?;
+
+    if update.rows_affected() != 1 {
+        return Err(ApiError::not_found("active job not found"));
+    }
 
     sqlx::query!(
         r#"
@@ -541,31 +596,15 @@ pub async fn post_result(
         "#,
         Uuid::now_v7(),
         job_id,
-        format!("{:?}", value.result.status).to_lowercase(),
+        result_status,
         value.result.score,
         value.result.max_score,
-        value.result.feedback,
-        SqlxJson(value.result.tests) as _,
-        SqlxJson(serde_json::to_value(&value.result).map_err(ApiError::internal)?) as _,
+        feedback,
+        SqlxJson(tests_json) as _,
+        SqlxJson(result_json) as _,
         value.stdout_summary,
         value.stderr_summary,
         value.duration_ms,
-        now
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(ApiError::internal)?;
-
-    sqlx::query!(
-        r#"
-        UPDATE grading_jobs
-        SET status = $2,
-            finished_at = $3,
-            lease_expires_at = NULL
-        WHERE id = $1
-        "#,
-        job_id,
-        status,
         now
     )
     .execute(&mut *tx)
@@ -582,29 +621,43 @@ pub async fn post_failed(
     Path(job_id): Path<Uuid>,
     WorkerJson { worker, value }: WorkerJson<JobFailureRequest>,
 ) -> Result<StatusCode, ApiError> {
-    ensure_job_owner(&state, worker.id, job_id).await?;
+    let now = Utc::now();
 
-    sqlx::query!(
+    let update = sqlx::query!(
         r#"
         UPDATE grading_jobs
         SET status = 'error',
-            error_message = $2,
-            finished_at = $3,
+            error_message = $3,
+            finished_at = $4,
             lease_expires_at = NULL
         WHERE id = $1
+          AND worker_id = $2
+          AND status IN ('claimed', 'running')
+          AND lease_expires_at > $4
         "#,
         job_id,
+        worker.id,
         format!("{}: {}", value.reason, value.message),
-        Utc::now()
+        now
     )
     .execute(&state.db)
     .await
     .map_err(ApiError::internal)?;
 
+    if update.rows_affected() != 1 {
+        return Err(ApiError::not_found("active job not found"));
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn ensure_job_owner(state: &AppState, worker_id: Uuid, job_id: Uuid) -> Result<(), ApiError> {
+async fn ensure_active_job_owner(
+    state: &AppState,
+    worker_id: Uuid,
+    job_id: Uuid,
+) -> Result<(), ApiError> {
+    let now = Utc::now();
+
     let exists = sqlx::query_scalar!(
         r#"
         SELECT EXISTS (
@@ -613,10 +666,12 @@ async fn ensure_job_owner(state: &AppState, worker_id: Uuid, job_id: Uuid) -> Re
             WHERE id = $1
               AND worker_id = $2
               AND status IN ('claimed', 'running')
+              AND lease_expires_at > $3
         )
         "#,
         job_id,
-        worker_id
+        worker_id,
+        now
     )
     .fetch_one(&state.db)
     .await
@@ -624,7 +679,96 @@ async fn ensure_job_owner(state: &AppState, worker_id: Uuid, job_id: Uuid) -> Re
     .unwrap_or(false);
 
     if !exists {
-        return Err(ApiError::not_found("job not found"));
+        return Err(ApiError::not_found("active job not found"));
+    }
+
+    Ok(())
+}
+
+fn validate_heartbeat_request(value: &WorkerHeartbeatRequest) -> Result<(), ApiError> {
+    if value.running_jobs < 0 {
+        return Err(ApiError::bad_request("running_jobs must be nonnegative"));
+    }
+    if value.max_jobs < 0 {
+        return Err(ApiError::bad_request("max_jobs must be nonnegative"));
+    }
+    if value.running_jobs > value.max_jobs {
+        return Err(ApiError::bad_request(
+            "running_jobs must not exceed max_jobs",
+        ));
+    }
+    if value.executor_backends.is_empty() {
+        return Err(ApiError::bad_request("executor_backends must not be empty"));
+    }
+    if value.runner_images.is_empty() {
+        return Err(ApiError::bad_request("runner_images must not be empty"));
+    }
+    if value.claimed_job_ids.len() > value.max_jobs as usize {
+        return Err(ApiError::bad_request(
+            "claimed_job_ids length must not exceed max_jobs",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_claim_request(value: &ClaimJobRequest) -> Result<(), ApiError> {
+    if value.available_slots < 0 {
+        return Err(ApiError::bad_request("available_slots must be nonnegative"));
+    }
+    if value.max_jobs <= 0 {
+        return Err(ApiError::bad_request("max_jobs must be greater than zero"));
+    }
+    if value.available_slots > value.max_jobs {
+        return Err(ApiError::bad_request(
+            "available_slots must not exceed max_jobs",
+        ));
+    }
+    if value.executor_backends.is_empty() {
+        return Err(ApiError::bad_request("executor_backends must not be empty"));
+    }
+    if value.runner_images.is_empty() {
+        return Err(ApiError::bad_request("runner_images must not be empty"));
+    }
+    if value.wait_seconds.unwrap_or(0) > 30 {
+        return Err(ApiError::bad_request("wait_seconds must be <= 30"));
+    }
+
+    Ok(())
+}
+
+fn validate_event_batch(value: &JobEventBatchRequest) -> Result<(), ApiError> {
+    if value.events.is_empty() {
+        return Err(ApiError::bad_request("events must not be empty"));
+    }
+    if value.events.len() > WORKER_EVENT_BATCH_MAX_EVENTS {
+        return Err(ApiError::bad_request("too many events in batch"));
+    }
+
+    let mut sequences = HashSet::new();
+
+    for event in &value.events {
+        if event.sequence < 0 {
+            return Err(ApiError::bad_request("event sequence must be nonnegative"));
+        }
+        if !sequences.insert(event.sequence) {
+            return Err(ApiError::bad_request("duplicate event sequence in batch"));
+        }
+        if event.event_type.trim().is_empty() {
+            return Err(ApiError::bad_request("event type must not be empty"));
+        }
+        if event.message.len() > WORKER_EVENT_MESSAGE_MAX_BYTES {
+            return Err(ApiError::bad_request("event message too large"));
+        }
+        if !matches!(
+            event.stream.as_str(),
+            "stdout" | "stderr" | "worker" | "resource"
+        ) {
+            return Err(ApiError::bad_request("invalid event stream"));
+        }
+        if !matches!(event.visibility.as_str(), "student" | "staff" | "internal") {
+            return Err(ApiError::bad_request("invalid event visibility"));
+        }
     }
 
     Ok(())
