@@ -7,7 +7,6 @@ pub struct Assignment {
     pub id: Uuid,
     pub slug: String,
     pub name: String,
-    pub cmsx_assignment_id: String,
     pub max_score: f64,
 }
 
