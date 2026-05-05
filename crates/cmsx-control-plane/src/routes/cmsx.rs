@@ -38,6 +38,7 @@ struct AssignmentTokenHash {
 }
 
 const UPLOAD_PART_BYTES: usize = 8 * 1024 * 1024;
+const CMSX_AUTH_TOKEN_MAX_BYTES: usize = 36;
 
 pub async fn submit(
     State(state): State<AppState>,
@@ -85,25 +86,16 @@ pub async fn submit(
     let job_id = Uuid::now_v7();
     let now = Utc::now();
 
-    let file_metadata = validate_cmsx_metadata(&parsed, state.cmsx.max_files)?;
-
-    let cmsx_assignment_id = required_field(&parsed.fields, "assignment_id")?.to_string();
-    let cmsx_assignment_name = required_field(&parsed.fields, "assignment_name")?.to_string();
-    let cmsx_group_id = required_field(&parsed.fields, "group_id")?.to_string();
-    let netids_raw = required_field(&parsed.fields, "netids")?.to_string();
-
-    let netids_json = parse_netids_json(&netids_raw);
-    let raw_metadata = raw_metadata_json(&parsed.fields);
-
     let mut stored_files = parsed.files;
 
-    for file in &mut stored_files {
-        let metadata = file_metadata
-            .get(&file.field_name)
-            .ok_or_else(|| ApiError::bad_request("missing uploaded file metadata"))?;
-
-        file.problem_name = Some(metadata.problem_name.clone());
-    }
+    let metadata =
+        match validate_stored_submission(&parsed.fields, &mut stored_files, state.cmsx.max_files) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                cleanup_stored_files(&state, &stored_files).await;
+                return Err(error);
+            }
+        };
 
     let db_result: Result<(), sqlx::Error> = async {
         let mut tx = state.db.begin().await?;
@@ -125,13 +117,13 @@ pub async fn submit(
         "#,
             submission_id,
             assignment.id,
-            cmsx_group_id,
-            cmsx_assignment_id,
-            cmsx_assignment_name,
-            netids_raw,
-            SqlxJson(netids_json) as _,
+            metadata.cmsx_group_id,
+            metadata.cmsx_assignment_id,
+            metadata.cmsx_assignment_name,
+            metadata.netids_raw,
+            SqlxJson(metadata.netids_json) as _,
             now,
-            SqlxJson(raw_metadata) as _
+            SqlxJson(metadata.raw_metadata) as _
         )
         .execute(&mut *tx)
         .await?;
@@ -145,18 +137,22 @@ pub async fn submit(
                 problem_name,
                 cmsx_file_field_name,
                 original_filename,
+                safe_filename,
                 storage_path,
                 content_sha256,
                 size_bytes,
                 created_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
                 file.id,
                 submission_id,
                 file.problem_name,
                 file.field_name,
                 file.original_filename,
+                file.safe_filename
+                    .as_ref()
+                    .expect("validated submission files should have safe filenames"),
                 file.storage_key,
                 file.content_sha256,
                 file.size_bytes,
@@ -208,6 +204,7 @@ pub async fn submit(
 struct StoredSubmissionFile {
     id: Uuid,
     problem_name: Option<String>,
+    safe_filename: Option<String>,
     field_name: String,
     original_filename: String,
     storage_key: String,
@@ -286,6 +283,8 @@ async fn parse_multipart(
             };
 
             if name == "auth_token" {
+                validate_auth_token_shape(&value)?;
+
                 authorized = verify_any_token(&value, token_hashes)?;
 
                 if !authorized {
@@ -388,6 +387,7 @@ async fn stream_submission_file(
     Ok(StoredSubmissionFile {
         id: submission_file_id,
         problem_name: None,
+        safe_filename: None,
         field_name,
         original_filename,
         storage_key,
@@ -517,21 +517,64 @@ fn required_field<'a>(
         .ok_or_else(|| ApiError::bad_request(format!("missing {name}")))
 }
 
+#[derive(Debug)]
+struct ValidatedSubmissionMetadata {
+    cmsx_assignment_id: String,
+    cmsx_assignment_name: String,
+    cmsx_group_id: String,
+    netids_raw: String,
+    netids_json: Option<Value>,
+    raw_metadata: Value,
+}
+
+fn validate_stored_submission(
+    fields: &HashMap<String, String>,
+    stored_files: &mut [StoredSubmissionFile],
+    max_files: usize,
+) -> Result<ValidatedSubmissionMetadata, ApiError> {
+    let file_metadata = validate_cmsx_metadata(fields, stored_files, max_files)?;
+
+    for file in stored_files {
+        let metadata = file_metadata
+            .get(&file.field_name)
+            .ok_or_else(|| ApiError::bad_request("missing uploaded file metadata"))?;
+
+        file.problem_name = Some(metadata.problem_name.clone());
+        file.safe_filename = Some(metadata.safe_filename.clone());
+    }
+
+    let cmsx_assignment_id = required_field(fields, "assignment_id")?.to_string();
+    let cmsx_assignment_name = required_field(fields, "assignment_name")?.to_string();
+    let cmsx_group_id = required_field(fields, "group_id")?.to_string();
+    let netids_raw = required_field(fields, "netids")?.to_string();
+
+    Ok(ValidatedSubmissionMetadata {
+        cmsx_assignment_id,
+        cmsx_assignment_name,
+        cmsx_group_id,
+        netids_json: parse_netids_json(&netids_raw),
+        netids_raw,
+        raw_metadata: raw_metadata_json(fields),
+    })
+}
+
 #[derive(Debug, Clone)]
 struct CmsxFileMetadata {
     problem_name: String,
+    safe_filename: String,
 }
 
 fn validate_cmsx_metadata(
-    parsed: &CmsxSubmission,
+    fields: &HashMap<String, String>,
+    files: &[StoredSubmissionFile],
     max_files: usize,
 ) -> Result<HashMap<String, CmsxFileMetadata>, ApiError> {
-    required_field(&parsed.fields, "netids")?;
-    required_field(&parsed.fields, "group_id")?;
-    required_field(&parsed.fields, "assignment_id")?;
-    required_field(&parsed.fields, "assignment_name")?;
+    required_field(fields, "netids")?;
+    required_field(fields, "group_id")?;
+    required_field(fields, "assignment_id")?;
+    required_field(fields, "assignment_name")?;
 
-    let num_files = required_field(&parsed.fields, "num_files")?
+    let num_files = required_field(fields, "num_files")?
         .parse::<usize>()
         .map_err(|_| ApiError::bad_request("num_files must be an integer"))?;
 
@@ -541,7 +584,7 @@ fn validate_cmsx_metadata(
         )));
     }
 
-    if parsed.files.len() != num_files {
+    if files.len() != num_files {
         return Err(ApiError::bad_request(
             "num_files does not match uploaded file count",
         ));
@@ -549,13 +592,15 @@ fn validate_cmsx_metadata(
 
     let mut by_field_name = HashMap::with_capacity(num_files);
     let mut expected_field_names = HashSet::with_capacity(num_files);
+    let mut safe_filenames = HashSet::with_capacity(num_files);
 
     for index in 0..num_files {
         let problem_name_key = format!("problem_name_{index}");
         let file_name_key = format!("file_name_{index}");
 
-        let problem_name = required_field(&parsed.fields, &problem_name_key)?.to_string();
-        let field_name = required_field(&parsed.fields, &file_name_key)?.to_string();
+        let problem_name = required_field(fields, &problem_name_key)?.to_string();
+        let field_name = required_field(fields, &file_name_key)?.to_string();
+        let safe_filename = safe_submission_filename(&field_name)?;
 
         if !expected_field_names.insert(field_name.clone()) {
             return Err(ApiError::bad_request(format!(
@@ -563,12 +608,24 @@ fn validate_cmsx_metadata(
             )));
         }
 
-        by_field_name.insert(field_name, CmsxFileMetadata { problem_name });
+        if !safe_filenames.insert(safe_filename.clone()) {
+            return Err(ApiError::bad_request(format!(
+                "duplicate uploaded filename after sanitization: {safe_filename}"
+            )));
+        }
+
+        by_field_name.insert(
+            field_name,
+            CmsxFileMetadata {
+                problem_name,
+                safe_filename,
+            },
+        );
     }
 
-    let mut seen_uploaded_field_names = HashSet::with_capacity(parsed.files.len());
+    let mut seen_uploaded_field_names = HashSet::with_capacity(files.len());
 
-    for file in &parsed.files {
+    for file in files {
         if !seen_uploaded_field_names.insert(file.field_name.clone()) {
             return Err(ApiError::bad_request(format!(
                 "duplicate uploaded file part {}",
@@ -585,6 +642,40 @@ fn validate_cmsx_metadata(
     }
 
     Ok(by_field_name)
+}
+
+fn safe_submission_filename(filename: &str) -> Result<String, ApiError> {
+    let trimmed = filename.trim();
+
+    if trimmed.is_empty() {
+        return Err(ApiError::bad_request("uploaded filename must not be empty"));
+    }
+
+    if trimmed == "." || trimmed == ".." {
+        return Err(ApiError::bad_request(
+            "uploaded filename must not be . or ..",
+        ));
+    }
+
+    let sanitized = sanitize_filename::sanitize(trimmed);
+
+    if sanitized != trimmed {
+        return Err(ApiError::bad_request(format!(
+            "uploaded filename is not safe: {filename}"
+        )));
+    }
+
+    Ok(sanitized)
+}
+
+fn validate_auth_token_shape(token: &str) -> Result<(), ApiError> {
+    if token.len() > CMSX_AUTH_TOKEN_MAX_BYTES {
+        return Err(ApiError::bad_request(format!(
+            "auth_token must be at most {CMSX_AUTH_TOKEN_MAX_BYTES} bytes"
+        )));
+    }
+
+    Ok(())
 }
 
 fn file_too_large_error(max_file_bytes: i64) -> ApiError {

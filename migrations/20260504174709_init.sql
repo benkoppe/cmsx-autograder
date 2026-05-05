@@ -90,6 +90,7 @@ CREATE TABLE submission_files (
   problem_name TEXT,
   cmsx_file_field_name TEXT NOT NULL,
   original_filename TEXT NOT NULL,
+  safe_filename TEXT NOT NULL,
   storage_path TEXT NOT NULL,
   content_sha256 TEXT NOT NULL,
   size_bytes BIGINT NOT NULL CHECK (size_bytes >= 0),
@@ -98,6 +99,9 @@ CREATE TABLE submission_files (
 
 CREATE INDEX idx_submission_files_submission_id
 ON submission_files(submission_id);
+
+CREATE UNIQUE INDEX idx_submission_files_submission_safe_filename
+ON submission_files(submission_id, safe_filename);
 
 CREATE TABLE grading_jobs (
   id UUID PRIMARY KEY,
@@ -191,3 +195,5 @@ CREATE TABLE artifacts (
 
 CREATE INDEX idx_artifacts_job_id
 ON artifacts(job_id);
+
+
