@@ -1,12 +1,12 @@
 use axum::{Router, routing::get};
-use sqlx::SqlitePool;
+use sqlx::PgPool;
 use tower_http::trace::TraceLayer;
 
 use crate::routes;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub db: SqlitePool,
+    pub db: PgPool,
 }
 
 pub fn router(state: AppState) -> Router {

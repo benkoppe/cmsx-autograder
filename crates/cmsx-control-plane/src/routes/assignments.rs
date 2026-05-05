@@ -39,7 +39,7 @@ pub async fn get_assignment(
             created_at,
             updated_at
         FROM assignments
-        WHERE slug = ?
+        WHERE slug = $1
         LIMIT 1
         "#,
         slug

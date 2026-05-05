@@ -1,11 +1,9 @@
-PRAGMA foreign_keys = ON;
-
 CREATE TABLE assignments (
   id TEXT NOT NULL PRIMARY KEY,
   slug TEXT NOT NULL,
   name TEXT NOT NULL,
   cmsx_assignment_id TEXT NOT NULL,
-  max_score REAL NOT NULL CHECK (max_score >= 0),
+  max_score DOUBLE PRECISION NOT NULL CHECK (max_score >= 0),
   execution_config_json TEXT NOT NULL,
   runner_config_json TEXT NOT NULL,
   capabilities_json TEXT NOT NULL,
@@ -85,8 +83,8 @@ CREATE TABLE grading_results (
   status TEXT NOT NULL CHECK (
     status IN ('passed', 'failed', 'error', 'cancelled')
   ),
-  score REAL NOT NULL CHECK (score >= 0),
-  max_score REAL NOT NULL CHECK (max_score >= 0),
+  score DOUBLE PRECISION NOT NULL CHECK (score >= 0),
+  max_score DOUBLE PRECISION NOT NULL CHECK (max_score >= 0),
   feedback TEXT,
   tests_json TEXT NOT NULL,
   result_json TEXT NOT NULL,

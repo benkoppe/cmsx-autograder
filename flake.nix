@@ -51,6 +51,10 @@
                 initialDatabases = [ { name = "cmsx"; } ];
               };
             };
+
+            enterShell = ''
+              export DATABASE_URL="postgresql:///cmsx?host=$PGHOST"
+            '';
           };
       };
     };

@@ -14,8 +14,7 @@ impl Config {
             .parse()
             .context("failed to parse CMSX_BIND_ADDR")?;
 
-        let database_url = env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "sqlite://dev/cmsx-autograder.db".to_string());
+        let database_url = env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
 
         Ok(Self {
             bind_addr,
