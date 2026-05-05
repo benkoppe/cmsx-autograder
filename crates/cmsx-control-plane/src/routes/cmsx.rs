@@ -254,7 +254,10 @@ async fn parse_multipart(
 
             if parsed.files.len() >= state.cmsx.max_files {
                 cleanup_stored_files(state, &parsed.files).await;
-                return Err(ApiError::payload_too_large("too many uploaded files"));
+                return Err(ApiError::payload_too_large(format!(
+                    "too many uploaded files; limit is {} files",
+                    state.cmsx.max_files
+                )));
             }
 
             match stream_submission_file(
@@ -344,11 +347,11 @@ async fn stream_submission_file(
 
         size_bytes = size_bytes
             .checked_add(chunk_len)
-            .ok_or_else(|| ApiError::payload_too_large("uploaded file is too large"))?;
+            .ok_or_else(|| file_too_large_error(max_file_bytes))?;
 
         if size_bytes > max_file_bytes {
             abort_upload(upload).await;
-            return Err(ApiError::payload_too_large("uploaded file is too large"));
+            return Err(file_too_large_error(max_file_bytes));
         }
 
         part.extend_from_slice(&chunk);
@@ -490,7 +493,10 @@ async fn read_text_field_limited(
         };
 
         if bytes.len().saturating_add(chunk.len()) > max_bytes {
-            return Err(ApiError::payload_too_large("multipart field is too large"));
+            return Err(ApiError::payload_too_large(format!(
+                "multipart field is too large; limit is {}",
+                human_readable_bytes(max_bytes)
+            )));
         }
 
         bytes.extend_from_slice(&chunk);
@@ -530,7 +536,9 @@ fn validate_cmsx_metadata(
         .map_err(|_| ApiError::bad_request("num_files must be an integer"))?;
 
     if num_files > max_files {
-        return Err(ApiError::payload_too_large("too many uploaded files"));
+        return Err(ApiError::payload_too_large(format!(
+            "too many uploaded files; limit is {max_files} files"
+        )));
     }
 
     if parsed.files.len() != num_files {
@@ -577,4 +585,27 @@ fn validate_cmsx_metadata(
     }
 
     Ok(by_field_name)
+}
+
+fn file_too_large_error(max_file_bytes: i64) -> ApiError {
+    ApiError::payload_too_large(format!(
+        "uploaded file is too large; limit is {}",
+        human_readable_bytes(max_file_bytes as usize)
+    ))
+}
+
+fn human_readable_bytes(bytes: usize) -> String {
+    const KIB: usize = 1024;
+    const MIB: usize = KIB * 1024;
+    const GIB: usize = MIB * 1024;
+
+    if bytes >= GIB && bytes.is_multiple_of(GIB) {
+        format!("{} GiB", bytes / GIB)
+    } else if bytes >= MIB && bytes.is_multiple_of(MIB) {
+        format!("{} MiB", bytes / MIB)
+    } else if bytes >= KIB && bytes.is_multiple_of(KIB) {
+        format!("{} KiB", bytes / KIB)
+    } else {
+        format!("{bytes} bytes")
+    }
 }

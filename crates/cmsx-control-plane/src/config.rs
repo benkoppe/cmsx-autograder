@@ -7,6 +7,9 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 
+const KIB: usize = 1024;
+const GIB: usize = 1024 * 1024 * 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub bind_addr: SocketAddr,
@@ -27,10 +30,10 @@ pub struct CmsxConfig {
 impl Default for CmsxConfig {
     fn default() -> Self {
         Self {
-            max_body_bytes: 256 * 1024 * 1024,
-            max_field_bytes: 16 * 1024,
-            max_file_bytes: 128 * 1024 * 1024,
-            max_files: 64,
+            max_body_bytes: 8 * GIB,
+            max_field_bytes: 64 * KIB,
+            max_file_bytes: (2 * GIB) as i64,
+            max_files: 512,
         }
     }
 }
@@ -146,6 +149,9 @@ impl CmsxConfig {
         }
         if self.max_files == 0 {
             bail!("cmsx.max_files must be greater than zero");
+        }
+        if self.max_body_bytes < self.max_file_bytes as usize {
+            bail!("cmsx.max_body_bytes must be at least cmsx.max_file_bytes");
         }
 
         Ok(())
