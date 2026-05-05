@@ -111,6 +111,10 @@ uploaded file part named by file_name_i
 
 The receiver must validate the assignment slug and `auth_token`, parse the multipart body, store raw CMSX metadata for debugging, normalize submission metadata into internal models, store uploaded files, create a grading job, and return quickly. It should store CMSX's submitted `assignment_id` as request metadata, but should not require users to configure the CMSX assignment ID in this system or validate the submitted value against assignment configuration. The assignment-specific webhook URL plus assignment token are the binding between CMSX and the local assignment; requiring a separately entered CMSX assignment ID would add setup friction without materially improving the initial security model.
 
+The initial receiver assumes `auth_token` appears before uploaded file parts, matching the order shown in the CMSX autograder guide. This avoids writing unauthenticated uploads to object storage. This assumption should be verified against real CMSX traffic; if CMSX does not follow this order in practice, the receiver should be changed to support arbitrary multipart ordering with a safe pre-auth spooling strategy.
+
+Local assignment identity is `assignments.slug`. CMSX assignment IDs are external request metadata and should not be required for assignment setup unless a future CMSX API integration needs them for grade publishing or reconciliation.
+
 CMSX documentation says only newest files are sent for an assignment submission. The system should not assume each webhook contains a complete project unless that behavior is verified. If full submission reconstruction is needed, it should be implemented as an explicit submission-state feature rather than assumed by the grader.
 
 CMSX documentation also appears inconsistent about `netids` separators. The receiver should preserve the raw `netids` value and avoid destructive parsing until real request behavior is confirmed.
@@ -372,7 +376,7 @@ The SDK should provide:
 
 ## Assignment Configuration
 
-Assignments should define their CMSX identity, execution requirements, runner environment, resource limits, capabilities, and grading bundle.
+Assignments should define their local webhook identity, execution requirements, runner environment, resource limits, capabilities, and grading bundle. They should not require a configured CMSX assignment ID; CMSX's submitted `assignment_id` is stored per submission as request metadata. The assignment slug plus a valid assignment auth token binds an incoming CMSX request to a local assignment.
 
 Example:
 
@@ -380,9 +384,6 @@ Example:
 slug = "c-basics"
 name = "C Basics"
 max_score = 100
-
-[cmsx]
-assignment_id = "21"
 
 [execution]
 backend = "docker-socket"
@@ -409,7 +410,7 @@ execute_student_code = true
 network = false
 ```
 
-Assignment auth tokens should be stored hashed, not in plaintext.
+Assignment auth tokens are the CMSX webhook authentication mechanism and should be stored hashed, not in plaintext.
 
 ## Capability Model
 
@@ -629,7 +630,6 @@ assignments:
   id
   slug
   name
-  cmsx_assignment_id
   max_score
   execution_config
   runner_config
@@ -653,7 +653,7 @@ submissions:
   netids_raw
   netids_json
   received_at
-  raw_metadata_json
+  raw_metadata
 
 submission_files:
   id
@@ -744,7 +744,8 @@ POST /workers/jobs/{job_id}/failed
 GET  /jobs/{job_id}
 GET  /jobs/{job_id}/events
 POST /jobs/{job_id}/cancel
-GET  /assignments/{assignment_id}/submissions
+GET  /assignments/{assignment_slug}
+GET  /assignments/{assignment_slug}/submissions
 GET  /submissions/{submission_id}/results
 ```
 
