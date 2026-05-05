@@ -25,7 +25,7 @@
 
         nativeBuildInputs = [
           pkgs.pkg-config
-          pkgs.sqlite
+          pkgs.postgresql
         ]
         ++ lib.optionals pkgs.stdenv.isDarwin [
           pkgs.libiconv

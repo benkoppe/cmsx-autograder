@@ -1,7 +1,12 @@
 { inputs, lib, ... }:
 {
   perSystem =
-    { config, pkgs, ... }:
+    {
+      config,
+      pkgs,
+      self',
+      ...
+    }:
     let
       craneLib = inputs.crane.mkLib pkgs;
 
@@ -22,7 +27,7 @@
       ];
 
       dataDevPackages = [
-        pkgs.sqlite
+        pkgs.postgresql
         pkgs.sqlx-cli
       ];
 
@@ -35,7 +40,12 @@
       ];
 
       devPackages =
-        rustDevPackages ++ pythonDevPackages ++ dataDevPackages ++ nixDevPackages ++ platformPackages;
+        rustDevPackages
+        ++ pythonDevPackages
+        ++ dataDevPackages
+        ++ nixDevPackages
+        ++ platformPackages
+        ++ [ self'.packages.services ];
     in
     {
       devShells.default = craneLib.devShell {
@@ -44,6 +54,9 @@
 
         shellHook = ''
           ${config.pre-commit.installationScript}
+          export DATABASE_URL="${
+            config.process-compose.services.services.postgres.cmsx.connectionURI { dbName = "cmsx"; }
+          }"
         '';
       };
     };

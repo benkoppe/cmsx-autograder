@@ -10,6 +10,9 @@
       url = "github:cachix/pre-commit-hooks.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    process-compose-flake.url = "github:Platonic-Systems/process-compose-flake";
+    services-flake.url = "github:juspay/services-flake";
   };
 
   outputs =
@@ -24,9 +27,11 @@
 
       imports = [
         inputs.pre-commit-hooks.flakeModule
+        inputs.process-compose-flake.flakeModule
         ./flake-parts/cargo.nix
         ./flake-parts/devshell.nix
         ./flake-parts/git-hooks.nix
+        ./flake-parts/services.nix
       ];
     };
 }

@@ -1,5 +1,5 @@
 # db
-dev
+data
 
 # rust
 target
@@ -10,5 +10,4 @@ __pycache__/
 
 # nix
 .direnv
-.devenv
 .pre-commit-config.yaml
