@@ -95,9 +95,7 @@ async fn authenticate_worker(
     let token = worker_token_from_headers(headers)?;
     let body_sha256 = hex::encode(Sha256::digest(body));
 
-    let claims = verify_worker_jwt(state, token, method, path, &body_sha256).await?;
-
-    Ok(AuthenticatedWorker { id: claims.sub })
+    verify_worker_jwt(state, token, method, path, &body_sha256).await
 }
 
 fn worker_token_from_headers(headers: &HeaderMap) -> Result<&str, ApiError> {
@@ -117,39 +115,37 @@ async fn verify_worker_jwt(
     method: &str,
     path: &str,
     body_sha256: &str,
-) -> Result<WorkerAuthClaims, ApiError> {
+) -> Result<AuthenticatedWorker, ApiError> {
     let metadata = Token::decode_metadata(token)
         .map_err(|_| ApiError::unauthorized("invalid worker token"))?;
 
-    let key_id = metadata
+    let fingerprint = metadata
         .key_id()
-        .ok_or_else(|| ApiError::unauthorized("missing worker key id"))?;
-
-    let worker_id =
-        Uuid::parse_str(key_id).map_err(|_| ApiError::unauthorized("invalid worker key id"))?;
+        .ok_or_else(|| ApiError::unauthorized("missing worker key id"))?
+        .to_string();
 
     let keys = sqlx::query!(
         r#"
-        SELECT worker_keys.public_key
+        SELECT worker_keys.worker_id, worker_keys.public_key
         FROM worker_keys
         JOIN workers ON workers.id = worker_keys.worker_id
-        WHERE worker_keys.worker_id = $1
+        WHERE worker_keys.public_key_fingerprint = $1
           AND worker_keys.revoked_at IS NULL
           AND workers.status != 'disabled'
         "#,
-        worker_id
+        fingerprint
     )
     .fetch_all(&state.db)
     .await
     .map_err(ApiError::internal)?;
 
     for key in keys {
+        let worker_id = key.worker_id;
         let public_key = Ed25519PublicKey::from_pem(&key.public_key).map_err(ApiError::internal)?;
 
         let options = VerificationOptions {
             allowed_audiences: Some(HashSet::from([WORKER_AUDIENCE.to_string()])),
-            required_subject: Some(worker_id.to_string()),
-            required_key_id: Some(worker_id.to_string()),
+            required_key_id: Some(fingerprint.clone()),
             time_tolerance: Some(jwt_simple::prelude::Duration::from_secs(60)),
             max_validity: Some(jwt_simple::prelude::Duration::from_secs(60)),
             ..Default::default()
@@ -161,13 +157,10 @@ async fn verify_worker_jwt(
 
         let custom = claims.custom;
 
-        if custom.iss != format!("worker:{worker_id}") {
+        if custom.iss != format!("worker-key:{fingerprint}") {
             continue;
         }
         if custom.aud != WORKER_AUDIENCE {
-            continue;
-        }
-        if custom.sub != worker_id {
             continue;
         }
         if custom.method != method {
@@ -182,7 +175,7 @@ async fn verify_worker_jwt(
 
         record_worker_jti(state, worker_id, custom.jti).await?;
 
-        return Ok(custom);
+        return Ok(AuthenticatedWorker { id: worker_id });
     }
 
     Err(ApiError::unauthorized("worker authentication failed"))
@@ -286,19 +279,15 @@ async fn record_worker_heartbeat(
             worker_id,
             status,
             version,
-            executor_backends,
-            runner_images,
             running_jobs,
             max_jobs,
             reported_at
         )
-        VALUES ($1, $2, 'online', $3, $4, $5, $6, $7, $8)
+        VALUES ($1, $2, 'online', $3, $4, $5, $6)
         "#,
         Uuid::now_v7(),
         worker_id,
         value.version,
-        SqlxJson(value.executor_backends.clone()) as _,
-        SqlxJson(value.runner_images.clone()) as _,
         value.running_jobs,
         value.max_jobs,
         now
@@ -412,33 +401,28 @@ async fn claim_available_jobs(
         WITH candidate AS (
             SELECT grading_jobs.id
             FROM grading_jobs
-            JOIN assignments ON assignments.id = grading_jobs.assignment_id
             WHERE (
                 grading_jobs.status = 'queued'
                 OR (
                     grading_jobs.status IN ('claimed', 'running')
-                    AND grading_jobs.lease_expires_at <= $4
+                    AND grading_jobs.lease_expires_at <= $2
                     AND grading_jobs.attempts < grading_jobs.max_attempts
+                    AND grading_jobs.cancel_requested_at IS NULL
                 )
             )
-              AND assignments.execution_config->>'backend' = ANY($2)
-              AND (
-                assignments.runner_config->>'environment' = ANY($3)
-                OR assignments.runner_config->>'image' = ANY($3)
-              )
             ORDER BY grading_jobs.queued_at
             FOR UPDATE SKIP LOCKED
-            LIMIT $5
+            LIMIT $3
         )
         UPDATE grading_jobs
         SET status = 'claimed',
             worker_id = $1,
             attempts = attempts + 1,
-            claimed_at = $4,
+            claimed_at = $2,
             started_at = NULL,
             finished_at = NULL,
-            lease_expires_at = $6,
-            last_heartbeat_at = $4,
+            lease_expires_at = $4,
+            last_heartbeat_at = $2,
             failure_reason = NULL,
             failure_message = NULL,
             failure_retryable = NULL
@@ -448,8 +432,6 @@ async fn claim_available_jobs(
             grading_jobs.id
         "#,
         worker_id,
-        &request.executor_backends,
-        &request.runner_images,
         now,
         i64::from(request.available_slots),
         now + Duration::seconds(LEASE_SECONDS)
@@ -1022,12 +1004,6 @@ fn validate_heartbeat_request(value: &WorkerHeartbeatRequest) -> Result<(), ApiE
             "running_jobs must not exceed max_jobs",
         ));
     }
-    if value.executor_backends.is_empty() {
-        return Err(ApiError::bad_request("executor_backends must not be empty"));
-    }
-    if value.runner_images.is_empty() {
-        return Err(ApiError::bad_request("runner_images must not be empty"));
-    }
     if value.active_job_ids.len() > value.max_jobs as usize {
         return Err(ApiError::bad_request(
             "active_job_ids length must not exceed max_jobs",
@@ -1040,20 +1016,6 @@ fn validate_heartbeat_request(value: &WorkerHeartbeatRequest) -> Result<(), ApiE
 fn validate_claim_request(value: &ClaimJobRequest) -> Result<(), ApiError> {
     if value.available_slots < 0 {
         return Err(ApiError::bad_request("available_slots must be nonnegative"));
-    }
-    if value.max_jobs <= 0 {
-        return Err(ApiError::bad_request("max_jobs must be greater than zero"));
-    }
-    if value.available_slots > value.max_jobs {
-        return Err(ApiError::bad_request(
-            "available_slots must not exceed max_jobs",
-        ));
-    }
-    if value.executor_backends.is_empty() {
-        return Err(ApiError::bad_request("executor_backends must not be empty"));
-    }
-    if value.runner_images.is_empty() {
-        return Err(ApiError::bad_request("runner_images must not be empty"));
     }
     if value.wait_seconds.unwrap_or(0) > 30 {
         return Err(ApiError::bad_request("wait_seconds must be <= 30"));

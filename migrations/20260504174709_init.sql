@@ -71,8 +71,6 @@ CREATE TABLE worker_heartbeats (
     status IN ('online', 'offline', 'disabled')
   ),
   version TEXT,
-  executor_backends JSONB NOT NULL,
-  runner_images JSONB NOT NULL,
   running_jobs INTEGER NOT NULL CHECK (running_jobs >= 0),
   max_jobs INTEGER NOT NULL CHECK (max_jobs >= 0),
   reported_at TIMESTAMPTZ NOT NULL

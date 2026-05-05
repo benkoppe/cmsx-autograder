@@ -20,11 +20,11 @@ use crate::{auth::WorkerSigner, capacity, client::ControlPlaneClient, config::Wo
 type ActiveJobs = Arc<RwLock<HashSet<Uuid>>>;
 
 pub async fn run(config: WorkerConfig) -> Result<()> {
-    let max_jobs = capacity::max_jobs(config.max_jobs);
+    let max_jobs = capacity::max_jobs(config.executor.max_jobs());
     let running_jobs = Arc::new(AtomicUsize::new(0));
     let active_jobs = Arc::new(RwLock::new(HashSet::new()));
 
-    let signer = WorkerSigner::from_pem(config.worker_id, &config.private_key_pem)?;
+    let signer = WorkerSigner::from_base64_pem(&config.private_key_base64)?;
     let client = ControlPlaneClient::new(config.control_plane_url.clone(), signer);
 
     tokio::spawn(heartbeat_loop(
@@ -61,11 +61,8 @@ async fn heartbeat_loop(
         };
 
         let request = WorkerHeartbeatRequest {
-            worker_name: config.worker_name.clone(),
             version: config.version.clone(),
             status: WorkerStatus::Online,
-            executor_backends: config.executor_backends.clone(),
-            runner_images: config.runner_images.clone(),
             running_jobs: running_jobs.load(Ordering::Relaxed) as i32,
             max_jobs: max_jobs as i32,
             active_job_ids,
@@ -97,9 +94,6 @@ async fn claim_loop(
 
         let request = ClaimJobRequest {
             available_slots: available_slots as i32,
-            executor_backends: config.executor_backends.clone(),
-            runner_images: config.runner_images.clone(),
-            max_jobs: max_jobs as i32,
             wait_seconds: Some(20),
         };
 

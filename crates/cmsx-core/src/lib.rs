@@ -84,7 +84,6 @@ pub struct TestResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerAuthClaims {
     pub iss: String,
-    pub sub: Uuid,
     pub aud: String,
     pub jti: Uuid,
     pub method: String,
@@ -102,11 +101,8 @@ pub enum WorkerStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerHeartbeatRequest {
-    pub worker_name: String,
     pub version: String,
     pub status: WorkerStatus,
-    pub executor_backends: Vec<String>,
-    pub runner_images: Vec<String>,
     pub running_jobs: i32,
     pub max_jobs: i32,
     pub active_job_ids: Vec<Uuid>,
@@ -124,9 +120,6 @@ pub struct WorkerHeartbeatResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaimJobRequest {
     pub available_slots: i32,
-    pub executor_backends: Vec<String>,
-    pub runner_images: Vec<String>,
-    pub max_jobs: i32,
     pub wait_seconds: Option<u64>,
 }
 

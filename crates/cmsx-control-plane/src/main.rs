@@ -4,6 +4,7 @@ mod db;
 mod error;
 mod routes;
 mod storage;
+mod workers;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
