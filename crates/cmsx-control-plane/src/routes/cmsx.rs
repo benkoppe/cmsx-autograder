@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use argon2::{
     Argon2, PasswordVerifier,
@@ -73,20 +73,24 @@ pub async fn submit(
     let job_id = Uuid::now_v7();
     let now = Utc::now();
 
-    let cmsx_assignment_id = parsed.fields.get("assignment_id").cloned();
-    let cmsx_assignment_name = parsed.fields.get("assignment_name").cloned();
-    let cmsx_group_id = parsed.fields.get("group_id").cloned();
-    let netids_raw = parsed.fields.get("netids").cloned().unwrap_or_default();
+    let file_metadata = validate_cmsx_metadata(&parsed)?;
+
+    let cmsx_assignment_id = required_field(&parsed.fields, "assignment_id")?.to_string();
+    let cmsx_assignment_name = required_field(&parsed.fields, "assignment_name")?.to_string();
+    let cmsx_group_id = required_field(&parsed.fields, "group_id")?.to_string();
+    let netids_raw = required_field(&parsed.fields, "netids")?.to_string();
+
     let netids_json = parse_netids_json(&netids_raw);
     let raw_metadata = raw_metadata_json(&parsed.fields);
-    let file_metadata = file_metadata(&parsed.fields);
 
     let mut stored_files = parsed.files;
 
     for file in &mut stored_files {
-        file.problem_name = file_metadata
+        let metadata = file_metadata
             .get(&file.field_name)
-            .and_then(|metadata| metadata.problem_name.clone());
+            .ok_or_else(|| ApiError::bad_request("missing uploaded file metadata"))?;
+
+        file.problem_name = Some(metadata.problem_name.clone());
     }
 
     let db_result: Result<(), sqlx::Error> = async {
@@ -226,10 +230,13 @@ async fn parse_multipart(
         };
 
         if let Some(filename) = field.file_name().map(str::to_owned) {
+            // CMSX's autograder documentation lists auth_token before uploaded file parts.
+            // We rely on that documented order so unauthenticated requests never write to
+            // object storage.
             if !authorized {
                 cleanup_stored_files(state, &parsed.files).await;
                 return Err(ApiError::bad_request(
-                    "auth_token must appear before uploaded files",
+                    "auth_token must appear before uploaded file parts",
                 ));
             }
 
@@ -265,23 +272,6 @@ async fn parse_multipart(
     if !authorized {
         cleanup_stored_files(state, &parsed.files).await;
         return Err(ApiError::bad_request("missing auth_token"));
-    }
-
-    if let Some(num_files) = parsed.fields.get("num_files") {
-        let expected = match num_files.parse::<usize>() {
-            Ok(expected) => expected,
-            Err(_) => {
-                cleanup_stored_files(state, &parsed.files).await;
-                return Err(ApiError::bad_request("num_files must be an integer"));
-            }
-        };
-
-        if expected != parsed.files.len() {
-            cleanup_stored_files(state, &parsed.files).await;
-            return Err(ApiError::bad_request(
-                "num_files does not match uploaded file count",
-            ));
-        }
     }
 
     Ok(parsed)
@@ -441,23 +431,76 @@ fn parse_netids_json(netids_raw: &str) -> Option<Value> {
     }
 }
 
-#[derive(Debug, Clone)]
-struct CmsxFileMetadata {
-    problem_name: Option<String>,
+fn required_field<'a>(
+    fields: &'a HashMap<String, String>,
+    name: &str,
+) -> Result<&'a str, ApiError> {
+    fields
+        .get(name)
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::bad_request(format!("missing {name}")))
 }
 
-fn file_metadata(fields: &HashMap<String, String>) -> HashMap<String, CmsxFileMetadata> {
-    let mut by_field_name = HashMap::new();
+#[derive(Debug, Clone)]
+struct CmsxFileMetadata {
+    problem_name: String,
+}
 
-    for (key, file_field_name) in fields {
-        let Some(index) = key.strip_prefix("file_name_") else {
-            continue;
-        };
+fn validate_cmsx_metadata(
+    parsed: &CmsxSubmission,
+) -> Result<HashMap<String, CmsxFileMetadata>, ApiError> {
+    required_field(&parsed.fields, "netids")?;
+    required_field(&parsed.fields, "group_id")?;
+    required_field(&parsed.fields, "assignment_id")?;
+    required_field(&parsed.fields, "assignment_name")?;
 
-        let problem_name = fields.get(&format!("problem_name_{index}")).cloned();
+    let num_files = required_field(&parsed.fields, "num_files")?
+        .parse::<usize>()
+        .map_err(|_| ApiError::bad_request("num_files must be an integer"))?;
 
-        by_field_name.insert(file_field_name.clone(), CmsxFileMetadata { problem_name });
+    if parsed.files.len() != num_files {
+        return Err(ApiError::bad_request(
+            "num_files does not match uploaded file count",
+        ));
     }
 
-    by_field_name
+    let mut by_field_name = HashMap::with_capacity(num_files);
+    let mut expected_field_names = HashSet::with_capacity(num_files);
+
+    for index in 0..num_files {
+        let problem_name_key = format!("problem_name_{index}");
+        let file_name_key = format!("file_name_{index}");
+
+        let problem_name = required_field(&parsed.fields, &problem_name_key)?.to_string();
+        let field_name = required_field(&parsed.fields, &file_name_key)?.to_string();
+
+        if !expected_field_names.insert(field_name.clone()) {
+            return Err(ApiError::bad_request(format!(
+                "duplicate uploaded file field name {field_name}"
+            )));
+        }
+
+        by_field_name.insert(field_name, CmsxFileMetadata { problem_name });
+    }
+
+    let mut seen_uploaded_field_names = HashSet::with_capacity(parsed.files.len());
+
+    for file in &parsed.files {
+        if !seen_uploaded_field_names.insert(file.field_name.clone()) {
+            return Err(ApiError::bad_request(format!(
+                "duplicate uploaded file part {}",
+                file.field_name
+            )));
+        }
+
+        if !expected_field_names.contains(&file.field_name) {
+            return Err(ApiError::bad_request(format!(
+                "unexpected uploaded file part {}",
+                file.field_name
+            )));
+        }
+    }
+
+    Ok(by_field_name)
 }

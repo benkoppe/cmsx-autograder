@@ -72,9 +72,9 @@ ON runner_environments(name);
 CREATE TABLE submissions (
   id UUID PRIMARY KEY,
   assignment_id UUID NOT NULL REFERENCES assignments(id) ON DELETE RESTRICT,
-  cmsx_group_id TEXT,
-  cmsx_assignment_id TEXT,
-  cmsx_assignment_name TEXT,
+  cmsx_group_id TEXT NOT NULL,
+  cmsx_assignment_id TEXT NOT NULL,
+  cmsx_assignment_name TEXT NOT NULL,
   netids_raw TEXT NOT NULL,
   netids_json JSONB,
   received_at TIMESTAMPTZ NOT NULL,

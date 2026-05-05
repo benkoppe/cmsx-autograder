@@ -54,9 +54,12 @@
 
         shellHook = ''
           ${config.pre-commit.installationScript}
-          export DATABASE_URL="${
+
+          export CMSX_DATABASE_URL="${
             config.process-compose.services.services.postgres.cmsx.connectionURI { dbName = "cmsx"; }
           }"
+          # sqlx compile-time
+          export DATABASE_URL="$CMSX_DATABASE_URL"
         '';
       };
     };
