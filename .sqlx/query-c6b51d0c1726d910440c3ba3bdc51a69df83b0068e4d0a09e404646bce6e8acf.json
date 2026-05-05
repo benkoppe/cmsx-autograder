@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            id,\n            slug,\n            name,\n            cmsx_assignment_id,\n            max_score,\n            execution_config AS \"execution_config: SqlxJson<Value>\",\n            runner_config AS \"runner_config: SqlxJson<Value>\",\n            capabilities AS \"capabilities: SqlxJson<Value>\",\n            created_at,\n            updated_at\n        FROM assignments\n        WHERE slug = $1\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "slug",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "cmsx_assignment_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "max_score",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 5,
+        "name": "execution_config: SqlxJson<Value>",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 6,
+        "name": "runner_config: SqlxJson<Value>",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 7,
+        "name": "capabilities: SqlxJson<Value>",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 8,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "c6b51d0c1726d910440c3ba3bdc51a69df83b0068e4d0a09e404646bce6e8acf"
+}

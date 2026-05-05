@@ -1,24 +1,22 @@
-use axum::{Router, routing::get};
-use std::net::SocketAddr;
-use tower_http::trace::TraceLayer;
+mod app;
+mod config;
+mod db;
+mod error;
+mod routes;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let app = Router::new()
-        .route("/healthz", get(healthz))
-        .layer(TraceLayer::new_for_http());
+    let config = config::Config::from_env()?;
+    let db = db::connect(&config.database_url).await?;
+    let state = app::AppState { db };
+    let app = app::router(state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-    tracing::info!("listening on http://{addr}");
+    tracing::info!("listening on http://{}", config.bind_addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     axum::serve(listener, app).await?;
 
     Ok(())
-}
-
-async fn healthz() -> &'static str {
-    "ok"
 }
