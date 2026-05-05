@@ -31,6 +31,12 @@ struct CmsxSubmission {
     files: Vec<StoredSubmissionFile>,
 }
 
+#[derive(Debug)]
+struct AssignmentTokenHash {
+    id: Uuid,
+    token_hash: String,
+}
+
 const UPLOAD_PART_BYTES: usize = 8 * 1024 * 1024;
 
 pub async fn submit(
@@ -54,7 +60,7 @@ pub async fn submit(
 
     let token_rows = sqlx::query!(
         r#"
-        SELECT token_hash
+        SELECT id, token_hash
         FROM assignment_tokens
         WHERE assignment_id = $1
           AND revoked_at IS NULL
@@ -65,7 +71,13 @@ pub async fn submit(
     .await
     .map_err(ApiError::internal)?;
 
-    let token_hashes: Vec<String> = token_rows.into_iter().map(|row| row.token_hash).collect();
+    let token_hashes: Vec<AssignmentTokenHash> = token_rows
+        .into_iter()
+        .map(|row| AssignmentTokenHash {
+            id: row.id,
+            token_hash: row.token_hash,
+        })
+        .collect();
 
     let submission_id = Uuid::now_v7();
     let parsed = parse_multipart(&state, submission_id, multipart, &token_hashes).await?;
@@ -73,7 +85,7 @@ pub async fn submit(
     let job_id = Uuid::now_v7();
     let now = Utc::now();
 
-    let file_metadata = validate_cmsx_metadata(&parsed)?;
+    let file_metadata = validate_cmsx_metadata(&parsed, state.cmsx.max_files)?;
 
     let cmsx_assignment_id = required_field(&parsed.fields, "assignment_id")?.to_string();
     let cmsx_assignment_name = required_field(&parsed.fields, "assignment_name")?.to_string();
@@ -207,7 +219,7 @@ async fn parse_multipart(
     state: &AppState,
     submission_id: Uuid,
     mut multipart: Multipart,
-    token_hashes: &[String],
+    token_hashes: &[AssignmentTokenHash],
 ) -> Result<CmsxSubmission, ApiError> {
     let mut parsed = CmsxSubmission::default();
     let mut authorized = false;
@@ -230,9 +242,9 @@ async fn parse_multipart(
         };
 
         if let Some(filename) = field.file_name().map(str::to_owned) {
-            // CMSX's autograder documentation lists auth_token before uploaded file parts.
-            // We rely on that documented order so unauthenticated requests never write to
-            // object storage.
+            // CMSX's autograder guide lists auth_token before uploaded file parts.
+            // We intentionally require that order for now so unauthenticated requests
+            // never write to object storage. Revisit after testing against real CMSX.
             if !authorized {
                 cleanup_stored_files(state, &parsed.files).await;
                 return Err(ApiError::bad_request(
@@ -240,7 +252,21 @@ async fn parse_multipart(
                 ));
             }
 
-            match stream_submission_file(state, submission_id, name, filename, &mut field).await {
+            if parsed.files.len() >= state.cmsx.max_files {
+                cleanup_stored_files(state, &parsed.files).await;
+                return Err(ApiError::payload_too_large("too many uploaded files"));
+            }
+
+            match stream_submission_file(
+                state,
+                submission_id,
+                name,
+                filename,
+                &mut field,
+                state.cmsx.max_file_bytes,
+            )
+            .await
+            {
                 Ok(file) => parsed.files.push(file),
                 Err(error) => {
                     cleanup_stored_files(state, &parsed.files).await;
@@ -248,11 +274,11 @@ async fn parse_multipart(
                 }
             }
         } else {
-            let value = match field.text().await {
+            let value = match read_text_field_limited(field, state.cmsx.max_field_bytes).await {
                 Ok(value) => value,
                 Err(error) => {
                     cleanup_stored_files(state, &parsed.files).await;
-                    return Err(ApiError::internal(error));
+                    return Err(error);
                 }
             };
 
@@ -283,6 +309,7 @@ async fn stream_submission_file(
     field_name: String,
     original_filename: String,
     field: &mut Field<'_>,
+    max_file_bytes: i64,
 ) -> Result<StoredSubmissionFile, ApiError> {
     let submission_file_id = Uuid::now_v7();
 
@@ -317,7 +344,12 @@ async fn stream_submission_file(
 
         size_bytes = size_bytes
             .checked_add(chunk_len)
-            .ok_or_else(|| ApiError::internal("uploaded file is too large"))?;
+            .ok_or_else(|| ApiError::payload_too_large("uploaded file is too large"))?;
+
+        if size_bytes > max_file_bytes {
+            abort_upload(upload).await;
+            return Err(ApiError::payload_too_large("uploaded file is too large"));
+        }
 
         part.extend_from_slice(&chunk);
 
@@ -379,29 +411,42 @@ async fn cleanup_stored_files(state: &AppState, stored_files: &[StoredSubmission
     }
 }
 
-fn verify_any_token(token: &str, token_hashes: &[String]) -> Result<bool, ApiError> {
+fn verify_any_token(token: &str, token_hashes: &[AssignmentTokenHash]) -> Result<bool, ApiError> {
+    let mut usable_hashes = 0_usize;
+
     for token_hash in token_hashes {
-        if verify_token(token, token_hash)? {
-            return Ok(true);
+        let parsed_hash = match PasswordHash::new(&token_hash.token_hash) {
+            Ok(parsed_hash) => parsed_hash,
+            Err(error) => {
+                tracing::warn!(
+                    token_id = %token_hash.id,
+                    error = %error,
+                    "ignoring malformed assignment token hash"
+                );
+                continue;
+            }
+        };
+
+        usable_hashes += 1;
+
+        match Argon2::default().verify_password(token.as_bytes(), &parsed_hash) {
+            Ok(()) => return Ok(true),
+            Err(PasswordHashError::Password) => {}
+            Err(error) => {
+                tracing::warn!(
+                    token_id = %token_hash.id,
+                    error = %error,
+                    "ignoring unusable assignment token hash"
+                );
+            }
         }
     }
 
-    Ok(false)
-}
-
-fn verify_token(token: &str, token_hash: &str) -> Result<bool, ApiError> {
-    let parsed_hash = PasswordHash::new(token_hash).map_err(map_password_hash_error)?;
-
-    Ok(Argon2::default()
-        .verify_password(token.as_bytes(), &parsed_hash)
-        .is_ok())
-}
-
-fn map_password_hash_error(error: PasswordHashError) -> ApiError {
-    match error {
-        PasswordHashError::Password => ApiError::unauthorized("invalid auth_token"),
-        _ => ApiError::internal(error),
+    if usable_hashes == 0 {
+        return Err(ApiError::internal("assignment has no usable token hashes"));
     }
+
+    Ok(false)
 }
 
 fn raw_metadata_json(fields: &HashMap<String, String>) -> Value {
@@ -431,6 +476,30 @@ fn parse_netids_json(netids_raw: &str) -> Option<Value> {
     }
 }
 
+async fn read_text_field_limited(
+    mut field: Field<'_>,
+    max_bytes: usize,
+) -> Result<String, ApiError> {
+    let mut bytes = BytesMut::new();
+
+    loop {
+        let chunk = field.chunk().await.map_err(ApiError::internal)?;
+
+        let Some(chunk) = chunk else {
+            break;
+        };
+
+        if bytes.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(ApiError::payload_too_large("multipart field is too large"));
+        }
+
+        bytes.extend_from_slice(&chunk);
+    }
+
+    String::from_utf8(bytes.to_vec())
+        .map_err(|_| ApiError::bad_request("multipart text field is not valid UTF-8"))
+}
+
 fn required_field<'a>(
     fields: &'a HashMap<String, String>,
     name: &str,
@@ -449,6 +518,7 @@ struct CmsxFileMetadata {
 
 fn validate_cmsx_metadata(
     parsed: &CmsxSubmission,
+    max_files: usize,
 ) -> Result<HashMap<String, CmsxFileMetadata>, ApiError> {
     required_field(&parsed.fields, "netids")?;
     required_field(&parsed.fields, "group_id")?;
@@ -458,6 +528,10 @@ fn validate_cmsx_metadata(
     let num_files = required_field(&parsed.fields, "num_files")?
         .parse::<usize>()
         .map_err(|_| ApiError::bad_request("num_files must be an integer"))?;
+
+    if num_files > max_files {
+        return Err(ApiError::payload_too_large("too many uploaded files"));
+    }
 
     if parsed.files.len() != num_files {
         return Err(ApiError::bad_request(

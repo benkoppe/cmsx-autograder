@@ -13,7 +13,11 @@ async fn main() -> anyhow::Result<()> {
     let db = db::connect(&config.database_url).await?;
     let storage = storage::Storage::from_config(&config.storage)?;
 
-    let state = app::AppState { db, storage };
+    let state = app::AppState {
+        db,
+        storage,
+        cmsx: config.cmsx.clone(),
+    };
     let app = app::router(state);
 
     tracing::info!("listening on http://{}", config.bind_addr);

@@ -38,6 +38,13 @@ impl ApiError {
         }
     }
 
+    pub fn payload_too_large(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            message: message.into(),
+        }
+    }
+
     pub fn internal(error: impl std::fmt::Display) -> Self {
         tracing::error!(error = %error, "internal API error");
 

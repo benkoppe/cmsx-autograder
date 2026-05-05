@@ -12,6 +12,27 @@ pub struct Config {
     pub bind_addr: SocketAddr,
     pub database_url: String,
     pub storage: StorageConfig,
+    #[serde(default)]
+    pub cmsx: CmsxConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CmsxConfig {
+    pub max_body_bytes: usize,
+    pub max_field_bytes: usize,
+    pub max_file_bytes: i64,
+    pub max_files: usize,
+}
+
+impl Default for CmsxConfig {
+    fn default() -> Self {
+        Self {
+            max_body_bytes: 256 * 1024 * 1024,
+            max_field_bytes: 16 * 1024,
+            max_file_bytes: 128 * 1024 * 1024,
+            max_files: 64,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +68,7 @@ impl Default for Config {
                 root: PathBuf::from("data/storage"),
                 prefix: String::new(),
             },
+            cmsx: CmsxConfig::default(),
         }
     }
 }
@@ -72,6 +94,7 @@ impl Config {
         }
 
         self.storage.validate().context("invalid storage config")?;
+        self.cmsx.validate().context("invalid CMSX config")?;
 
         Ok(())
     }
@@ -106,6 +129,25 @@ impl StorageConfig {
                 }
             }
         }
+        Ok(())
+    }
+}
+
+impl CmsxConfig {
+    fn validate(&self) -> Result<()> {
+        if self.max_body_bytes == 0 {
+            bail!("cmsx.max_body_bytes must be greater than zero");
+        }
+        if self.max_field_bytes == 0 {
+            bail!("cmsx.max_field_bytes must be greater than zero");
+        }
+        if self.max_file_bytes <= 0 {
+            bail!("cmsx.max_file_bytes must be greater than zero");
+        }
+        if self.max_files == 0 {
+            bail!("cmsx.max_files must be greater than zero");
+        }
+
         Ok(())
     }
 }
