@@ -5,25 +5,17 @@ use argon2::{
     password_hash::{Error as PasswordHashError, PasswordHash},
 };
 use axum::{
-    Json,
     extract::{Multipart, Path, State, multipart::Field},
+    http::StatusCode,
 };
 use bytes::{Bytes, BytesMut};
 use chrono::Utc;
-use serde::Serialize;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
 use crate::{app::AppState, error::ApiError};
-
-#[derive(Debug, Serialize)]
-pub struct SubmissionResponse {
-    pub submission_id: Uuid,
-    pub job_id: Uuid,
-    pub status: &'static str,
-}
 
 #[derive(Debug, Default)]
 struct CmsxSubmission {
@@ -38,13 +30,13 @@ struct AssignmentTokenHash {
 }
 
 const UPLOAD_PART_BYTES: usize = 8 * 1024 * 1024;
-const CMSX_AUTH_TOKEN_MAX_BYTES: usize = 36;
+const CMSX_AUTH_TOKEN_MAX_CHARS: usize = 36;
 
 pub async fn submit(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     multipart: Multipart,
-) -> Result<Json<SubmissionResponse>, ApiError> {
+) -> Result<StatusCode, ApiError> {
     let assignment = sqlx::query!(
         r#"
         SELECT id
@@ -193,11 +185,7 @@ pub async fn submit(
         return Err(ApiError::internal(error));
     }
 
-    Ok(Json(SubmissionResponse {
-        submission_id,
-        job_id,
-        status: "queued",
-    }))
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Debug)]
@@ -239,9 +227,9 @@ async fn parse_multipart(
         };
 
         if let Some(filename) = field.file_name().map(str::to_owned) {
-            // CMSX's autograder guide lists auth_token before uploaded file parts.
-            // We intentionally require that order for now so unauthenticated requests
-            // never write to object storage. Revisit after testing against real CMSX.
+            // CMSX's autograder guide shows auth_token before uploaded file parts.
+            // We require that ordering so unauthenticated requests cannot stream file
+            // data into object storage before token validation.
             if !authorized {
                 cleanup_stored_files(state, &parsed.files).await;
                 return Err(ApiError::bad_request(
@@ -669,9 +657,9 @@ fn safe_submission_filename(filename: &str) -> Result<String, ApiError> {
 }
 
 fn validate_auth_token_shape(token: &str) -> Result<(), ApiError> {
-    if token.len() > CMSX_AUTH_TOKEN_MAX_BYTES {
+    if token.chars().count() > CMSX_AUTH_TOKEN_MAX_CHARS {
         return Err(ApiError::bad_request(format!(
-            "auth_token must be at most {CMSX_AUTH_TOKEN_MAX_BYTES} bytes"
+            "auth_token must be at most {CMSX_AUTH_TOKEN_MAX_CHARS} characters"
         )));
     }
 
@@ -779,6 +767,7 @@ mod tests {
         explicit_num_files: Option<String>,
         files: Vec<CmsxFilePart>,
         file_parts_before_auth: bool,
+        omitted_fields: Vec<&'static str>,
     }
 
     #[derive(Debug)]
@@ -857,6 +846,7 @@ mod tests {
                     b"print('hello')\n".to_vec(),
                 )],
                 file_parts_before_auth: false,
+                omitted_fields: Vec::new(),
             }
         }
     }
@@ -887,6 +877,15 @@ mod tests {
             self
         }
 
+        fn without_field(mut self, field: &'static str) -> Self {
+            self.omitted_fields.push(field);
+            self
+        }
+
+        fn includes_field(&self, field: &str) -> bool {
+            !self.omitted_fields.contains(&field)
+        }
+
         fn multipart(&self) -> CmsxMultipart {
             let boundary = "cmsx-test-boundary";
             let mut parts = Vec::new();
@@ -897,27 +896,43 @@ mod tests {
                 parts.push(file.to_file_part());
             }
 
-            if let Some(token) = &self.token {
+            if let Some(token) = &self.token
+                && self.includes_field("auth_token")
+            {
                 parts.push(text_part("auth_token", token));
             }
 
-            parts.push(text_part("netids", &self.netids));
-            parts.push(text_part("group_id", &self.group_id));
-            parts.push(text_part("assignment_id", &self.assignment_id));
-            parts.push(text_part("assignment_name", &self.assignment_name));
-            parts.push(text_part(
-                "num_files",
-                self.explicit_num_files
-                    .as_deref()
-                    .unwrap_or(&self.files.len().to_string()),
-            ));
+            if self.includes_field("netids") {
+                parts.push(text_part("netids", &self.netids));
+            }
+            if self.includes_field("group_id") {
+                parts.push(text_part("group_id", &self.group_id));
+            }
+            if self.includes_field("assignment_id") {
+                parts.push(text_part("assignment_id", &self.assignment_id));
+            }
+            if self.includes_field("assignment_name") {
+                parts.push(text_part("assignment_name", &self.assignment_name));
+            }
+            if self.includes_field("num_files") {
+                parts.push(text_part(
+                    "num_files",
+                    self.explicit_num_files
+                        .as_deref()
+                        .unwrap_or(&self.files.len().to_string()),
+                ));
+            }
 
             for (index, file) in self.files.iter().enumerate() {
-                parts.push(text_part(
-                    &format!("problem_name_{index}"),
-                    &file.problem_name,
-                ));
-                parts.push(text_part(&format!("file_name_{index}"), &file.field_name));
+                let problem_name_key = format!("problem_name_{index}");
+                let file_name_key = format!("file_name_{index}");
+
+                if self.includes_field(&problem_name_key) {
+                    parts.push(text_part(&problem_name_key, &file.problem_name));
+                }
+                if self.includes_field(&file_name_key) {
+                    parts.push(text_part(&file_name_key, &file.field_name));
+                }
             }
 
             for (index, file) in self.files.iter().enumerate() {
@@ -1143,6 +1158,25 @@ mod tests {
         (status, json)
     }
 
+    async fn response_body(response: Response) -> (StatusCode, bytes::Bytes) {
+        let status = response.status();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("failed to read response body")
+            .to_bytes();
+
+        (status, body)
+    }
+
+    async fn assert_no_content_success(response: Response) {
+        let (status, body) = response_body(response).await;
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(body.is_empty());
+    }
+
     async fn table_count(db: &PgPool, table: &str) -> i64 {
         let sql = format!("SELECT COUNT(*) FROM {table}");
 
@@ -1152,10 +1186,14 @@ mod tests {
             .unwrap_or_else(|error| panic!("failed to count table {table}: {error}"))
     }
 
+    async fn assert_ingestion_counts(db: &PgPool, submissions: i64, files: i64, jobs: i64) {
+        assert_eq!(table_count(db, "submissions").await, submissions);
+        assert_eq!(table_count(db, "submission_files").await, files);
+        assert_eq!(table_count(db, "grading_jobs").await, jobs);
+    }
+
     async fn assert_no_ingestion_writes(db: &PgPool) {
-        assert_eq!(table_count(db, "submissions").await, 0);
-        assert_eq!(table_count(db, "submission_files").await, 0);
-        assert_eq!(table_count(db, "grading_jobs").await, 0);
+        assert_ingestion_counts(db, 0, 0, 0).await;
     }
 
     async fn fetch_submission(db: &PgPool) -> SubmissionRow {
@@ -1275,8 +1313,8 @@ mod tests {
             .sum()
     }
 
-    fn two_file_submission() -> CmsxSubmissionBuilder {
-        CmsxSubmissionBuilder::default().with_files(vec![
+    fn documented_sample_files() -> Vec<CmsxFilePart> {
+        vec![
             CmsxFilePart::new(
                 "Part 1 of the Assignment",
                 "Part_1_of_the_Assignment",
@@ -1289,7 +1327,34 @@ mod tests {
                 "Part_2_of_the_Assignment.py",
                 b"print('part 2')\n".to_vec(),
             ),
-        ])
+            CmsxFilePart::new(
+                "Part 3 of the Assignment",
+                "Part_3_of_the_Assignment",
+                "Part_3_of_the_Assignment.py",
+                b"print('part 3')\n".to_vec(),
+            ),
+        ]
+    }
+
+    fn documented_sample_submission() -> CmsxSubmissionBuilder {
+        CmsxSubmissionBuilder::default().with_files(documented_sample_files())
+    }
+
+    fn assert_submission_file(
+        file: &SubmissionFileRow,
+        submission_id: &Uuid,
+        problem_name: &str,
+        field_name: &str,
+        original_filename: &str,
+        contents: &[u8],
+    ) {
+        assert_eq!(file.problem_name.as_deref(), Some(problem_name));
+        assert_eq!(file.cmsx_file_field_name, field_name);
+        assert_eq!(file.original_filename, original_filename);
+        assert_eq!(file.safe_filename, field_name);
+        assert_eq!(file.content_sha256, sha256_hex(contents));
+        assert_eq!(file.size_bytes, contents.len() as i64);
+        assert!(file.storage_path.contains(&submission_id.to_string()));
     }
 
     #[tokio::test]
@@ -1297,24 +1362,13 @@ mod tests {
         let test = test_app(|_| {}).await;
 
         let response = test
-            .submit(TEST_SLUG, two_file_submission().multipart())
+            .submit(TEST_SLUG, documented_sample_submission().multipart())
             .await;
-        let (status, body) = response_json(response).await;
 
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["status"], "queued");
-
-        let response_submission_id: Uuid = serde_json::from_value(body["submission_id"].clone())
-            .expect("submission_id should be a UUID");
-        let response_job_id: Uuid =
-            serde_json::from_value(body["job_id"].clone()).expect("job_id should be a UUID");
-
-        assert_eq!(table_count(&test.db, "submissions").await, 1);
-        assert_eq!(table_count(&test.db, "submission_files").await, 2);
-        assert_eq!(table_count(&test.db, "grading_jobs").await, 1);
+        assert_no_content_success(response).await;
+        assert_ingestion_counts(&test.db, 1, 3, 1).await;
 
         let submission = fetch_submission(&test.db).await;
-        assert_eq!(submission.id, response_submission_id);
         assert_eq!(submission.assignment_id, test.assignment_id);
         assert_eq!(submission.cmsx_group_id, "341");
         assert_eq!(submission.cmsx_assignment_id, "21");
@@ -1334,49 +1388,37 @@ mod tests {
             submission.raw_metadata["assignment_name"],
             "Assignment 1: Intro to CMSX"
         );
-        assert_eq!(submission.raw_metadata["num_files"], "2");
+        assert_eq!(submission.raw_metadata["num_files"], "3");
         assert!(submission.raw_metadata.get("auth_token").is_none());
 
-        let job_submission_id = fetch_job_submission_id(&test.db).await;
-        assert_eq!(job_submission_id, response_submission_id);
-
-        let stored_job_id = sqlx::query_scalar::<_, Uuid>("SELECT id FROM grading_jobs LIMIT 1")
-            .fetch_one(&test.db)
-            .await
-            .expect("failed to fetch grading job id");
-        assert_eq!(stored_job_id, response_job_id);
+        assert_eq!(fetch_job_submission_id(&test.db).await, submission.id);
 
         let files = fetch_submission_files(&test.db).await;
-        assert_eq!(files.len(), 2);
+        assert_eq!(files.len(), 3);
 
-        assert_eq!(
-            files[0].problem_name.as_deref(),
-            Some("Part 1 of the Assignment")
+        assert_submission_file(
+            &files[0],
+            &submission.id,
+            "Part 1 of the Assignment",
+            "Part_1_of_the_Assignment",
+            "Part_1_of_the_Assignment.py",
+            b"print('part 1')\n",
         );
-        assert_eq!(files[0].cmsx_file_field_name, "Part_1_of_the_Assignment");
-        assert_eq!(files[0].original_filename, "Part_1_of_the_Assignment.py");
-        assert_eq!(files[0].safe_filename, "Part_1_of_the_Assignment");
-        assert_eq!(files[0].content_sha256, sha256_hex(b"print('part 1')\n"));
-        assert_eq!(files[0].size_bytes, b"print('part 1')\n".len() as i64);
-        assert!(
-            files[0]
-                .storage_path
-                .contains(&response_submission_id.to_string())
+        assert_submission_file(
+            &files[1],
+            &submission.id,
+            "Part 2 of the Assignment",
+            "Part_2_of_the_Assignment",
+            "Part_2_of_the_Assignment.py",
+            b"print('part 2')\n",
         );
-
-        assert_eq!(
-            files[1].problem_name.as_deref(),
-            Some("Part 2 of the Assignment")
-        );
-        assert_eq!(files[1].cmsx_file_field_name, "Part_2_of_the_Assignment");
-        assert_eq!(files[1].original_filename, "Part_2_of_the_Assignment.py");
-        assert_eq!(files[1].safe_filename, "Part_2_of_the_Assignment");
-        assert_eq!(files[1].content_sha256, sha256_hex(b"print('part 2')\n"));
-        assert_eq!(files[1].size_bytes, b"print('part 2')\n".len() as i64);
-        assert!(
-            files[1]
-                .storage_path
-                .contains(&response_submission_id.to_string())
+        assert_submission_file(
+            &files[2],
+            &submission.id,
+            "Part 3 of the Assignment",
+            "Part_3_of_the_Assignment",
+            "Part_3_of_the_Assignment.py",
+            b"print('part 3')\n",
         );
     }
 
@@ -1401,7 +1443,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_missing_auth_token() {
+    async fn rejects_missing_auth_token_when_no_file_parts_are_present() {
+        let test = test_app(|_| {}).await;
+
+        let response = test
+            .submit(
+                TEST_SLUG,
+                CmsxSubmissionBuilder::default()
+                    .without_auth_token()
+                    .with_files(Vec::new())
+                    .multipart(),
+            )
+            .await;
+        let (status, body) = response_json(response).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "missing auth_token");
+        assert_no_ingestion_writes(&test.db).await;
+        assert_storage_has_no_files(test.storage_root.path());
+    }
+
+    #[tokio::test]
+    async fn rejects_uploaded_file_without_prior_auth_token() {
         let test = test_app(|_| {}).await;
 
         let response = test
@@ -1461,9 +1524,86 @@ mod tests {
         let (status, body) = response_json(response).await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"], "auth_token must be at most 36 bytes");
+        assert_eq!(body["error"], "auth_token must be at most 36 characters");
         assert_no_ingestion_writes(&test.db).await;
         assert_storage_has_no_files(test.storage_root.path());
+    }
+
+    #[tokio::test]
+    async fn accepts_36_character_non_ascii_auth_token_for_shape_validation() {
+        let test = test_app(|_| {}).await;
+
+        let response = test
+            .submit(
+                TEST_SLUG,
+                CmsxSubmissionBuilder::default()
+                    .with_token("é".repeat(36))
+                    .multipart(),
+            )
+            .await;
+        let (status, body) = response_json(response).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "invalid auth_token");
+        assert_no_ingestion_writes(&test.db).await;
+        assert_storage_has_no_files(test.storage_root.path());
+    }
+
+    #[tokio::test]
+    async fn rejects_auth_token_longer_than_36_non_ascii_characters() {
+        let test = test_app(|_| {}).await;
+
+        let response = test
+            .submit(
+                TEST_SLUG,
+                CmsxSubmissionBuilder::default()
+                    .with_token("é".repeat(37))
+                    .multipart(),
+            )
+            .await;
+        let (status, body) = response_json(response).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "auth_token must be at most 36 characters");
+        assert_no_ingestion_writes(&test.db).await;
+        assert_storage_has_no_files(test.storage_root.path());
+    }
+
+    async fn assert_missing_required_cmsx_metadata_field(
+        field: &'static str,
+        expected_error: &str,
+    ) {
+        let test = test_app(|_| {}).await;
+
+        let response = test
+            .submit(
+                TEST_SLUG,
+                CmsxSubmissionBuilder::default()
+                    .without_field(field)
+                    .multipart(),
+            )
+            .await;
+        let (status, body) = response_json(response).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "field={field}");
+        assert_eq!(body["error"], expected_error, "field={field}");
+        assert_no_ingestion_writes(&test.db).await;
+        assert_storage_has_no_files(test.storage_root.path());
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_required_cmsx_metadata_fields() {
+        for (field, expected_error) in [
+            ("netids", "missing netids"),
+            ("group_id", "missing group_id"),
+            ("assignment_id", "missing assignment_id"),
+            ("assignment_name", "missing assignment_name"),
+            ("num_files", "missing num_files"),
+            ("problem_name_0", "missing problem_name_0"),
+            ("file_name_0", "missing file_name_0"),
+        ] {
+            assert_missing_required_cmsx_metadata_field(field, expected_error).await;
+        }
     }
 
     #[tokio::test]
@@ -1474,7 +1614,7 @@ mod tests {
             .submit(
                 TEST_SLUG,
                 CmsxSubmissionBuilder::default()
-                    .with_num_files("2")
+                    .with_num_files("0")
                     .multipart(),
             )
             .await;
