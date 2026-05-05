@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/cmsx-control-plane", "crates/cmsx-core"]
+members = ["crates/cmsx-control-plane", "crates/cmsx-core", "crates/cmsx-worker"]
 metadata.crane.name = "cmsx-autograder"
 
 [workspace.package]

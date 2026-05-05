@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use axum::{
     Json,
     body::Bytes,
@@ -399,7 +401,7 @@ async fn try_claim_job(
 pub async fn get_job(
     State(state): State<AppState>,
     Path(job_id): Path<Uuid>,
-    WorkerJson { worker, .. }: WorkerJson<Value>,
+    worker: AuthenticatedWorker,
 ) -> Result<Json<ClaimedJob>, ApiError> {
     let job = load_owned_job(&state, worker.id, job_id).await?;
     Ok(Json(job))
