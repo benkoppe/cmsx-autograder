@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT token_hash\n        FROM assignment_tokens\n        WHERE assignment_id = $1\n          AND revoked_at IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "token_hash",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b14b299f6ab4c8535aecfdfd8564301e7ff9123ab97c181093811ff222beaf89"
+}

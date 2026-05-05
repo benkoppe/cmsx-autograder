@@ -109,7 +109,7 @@ file_name_i
 uploaded file part named by file_name_i
 ```
 
-The receiver must validate the assignment slug and `auth_token`, parse the multipart body, store raw CMSX metadata for debugging, normalize submission metadata into internal models, store uploaded files, create a grading job, and return quickly.
+The receiver must validate the assignment slug and `auth_token`, parse the multipart body, store raw CMSX metadata for debugging, normalize submission metadata into internal models, store uploaded files, create a grading job, and return quickly. It should store CMSX's submitted `assignment_id` as request metadata, but should not require users to configure the CMSX assignment ID in this system or validate the submitted value against assignment configuration. The assignment-specific webhook URL plus assignment token are the binding between CMSX and the local assignment; requiring a separately entered CMSX assignment ID would add setup friction without materially improving the initial security model.
 
 CMSX documentation says only newest files are sent for an assignment submission. The system should not assume each webhook contains a complete project unless that behavior is verified. If full submission reconstruction is needed, it should be implemented as an explicit submission-state feature rather than assumed by the grader.
 

@@ -2,7 +2,6 @@ CREATE TABLE assignments (
   id UUID PRIMARY KEY,
   slug TEXT NOT NULL,
   name TEXT NOT NULL,
-  cmsx_assignment_id TEXT NOT NULL,
   max_score DOUBLE PRECISION NOT NULL CHECK (
     max_score >= 0 AND max_score != 'NaN'::DOUBLE PRECISION
   ),
@@ -73,7 +72,7 @@ ON runner_environments(name);
 CREATE TABLE submissions (
   id UUID PRIMARY KEY,
   assignment_id UUID NOT NULL REFERENCES assignments(id) ON DELETE RESTRICT,
-  cmsx_group_id TEXT,
+  cmsx_group_id TEXT NOT NULL,
   cmsx_assignment_id TEXT NOT NULL,
   cmsx_assignment_name TEXT NOT NULL,
   netids_raw TEXT NOT NULL,

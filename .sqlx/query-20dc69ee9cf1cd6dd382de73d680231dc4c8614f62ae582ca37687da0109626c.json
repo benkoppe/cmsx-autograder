@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO submissions (\n            id,\n            assignment_id,\n            cmsx_group_id,\n            cmsx_assignment_id,\n            cmsx_assignment_name,\n            netids_raw,\n            netids_json,\n            received_at,\n            raw_metadata\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Jsonb",
+        "Timestamptz",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "20dc69ee9cf1cd6dd382de73d680231dc4c8614f62ae582ca37687da0109626c"
+}

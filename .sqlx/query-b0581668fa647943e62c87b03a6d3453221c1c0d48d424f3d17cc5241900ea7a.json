@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO grading_jobs (\n            id,\n            submission_id,\n            assignment_id,\n            status,\n            attempts,\n            queued_at\n        )\n        VALUES ($1, $2, $3, 'queued', 0, $4)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b0581668fa647943e62c87b03a6d3453221c1c0d48d424f3d17cc5241900ea7a"
+}
