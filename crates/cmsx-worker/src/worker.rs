@@ -55,7 +55,7 @@ async fn heartbeat_loop(
     loop {
         interval.tick().await;
 
-        let claimed_job_ids = {
+        let active_job_ids = {
             let active_jobs = active_jobs.read().await;
             active_jobs.iter().copied().collect()
         };
@@ -68,7 +68,7 @@ async fn heartbeat_loop(
             runner_images: config.runner_images.clone(),
             running_jobs: running_jobs.load(Ordering::Relaxed) as i32,
             max_jobs: max_jobs as i32,
-            claimed_job_ids,
+            active_job_ids,
         };
 
         if let Err(error) = client.heartbeat(&request).await {
@@ -113,6 +113,7 @@ async fn claim_loop(
         };
 
         if response.jobs.is_empty() {
+            tokio::time::sleep(Duration::from_secs(1)).await;
             continue;
         }
 

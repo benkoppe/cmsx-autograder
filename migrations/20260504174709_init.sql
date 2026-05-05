@@ -54,6 +54,16 @@ CREATE UNIQUE INDEX idx_worker_keys_fingerprint_active
 ON worker_keys(public_key_fingerprint)
 WHERE revoked_at IS NULL;
 
+CREATE TABLE worker_request_nonces (
+  worker_id UUID NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
+  jti UUID NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (worker_id, jti)
+);
+
+CREATE INDEX idx_worker_request_nonces_expires_at
+ON worker_request_nonces(expires_at);
+
 CREATE TABLE worker_heartbeats (
   id UUID PRIMARY KEY,
   worker_id UUID NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
@@ -127,6 +137,7 @@ CREATE TABLE grading_jobs (
     status IN ('queued', 'claimed', 'running', 'succeeded', 'failed', 'error', 'cancelled')
   ),
   attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  max_attempts INTEGER NOT NULL DEFAULT 3 CHECK (max_attempts > 0),
   queued_at TIMESTAMPTZ NOT NULL,
   claimed_at TIMESTAMPTZ,
   started_at TIMESTAMPTZ,
@@ -134,7 +145,9 @@ CREATE TABLE grading_jobs (
   lease_expires_at TIMESTAMPTZ,
   last_heartbeat_at TIMESTAMPTZ,
   cancel_requested_at TIMESTAMPTZ,
-  error_message TEXT
+  failure_reason TEXT,
+  failure_message TEXT,
+  failure_retryable BOOLEAN
 );
 
 CREATE INDEX idx_grading_jobs_status_queued

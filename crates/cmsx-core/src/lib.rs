@@ -109,14 +109,16 @@ pub struct WorkerHeartbeatRequest {
     pub runner_images: Vec<String>,
     pub running_jobs: i32,
     pub max_jobs: i32,
-    pub claimed_job_ids: Vec<Uuid>,
+    pub active_job_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerHeartbeatResponse {
     pub worker_id: Uuid,
     pub lease_seconds: i64,
+    pub renewed_job_ids: Vec<Uuid>,
     pub cancelled_job_ids: Vec<Uuid>,
+    pub unknown_job_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,9 +140,12 @@ pub struct ClaimedJob {
     pub id: Uuid,
     pub submission_id: Uuid,
     pub assignment_id: Uuid,
+    pub lease_expires_at: DateTime<Utc>,
+    pub attempt: i32,
     pub execution_config: serde_json::Value,
     pub runner_config: serde_json::Value,
     pub capabilities: serde_json::Value,
+    pub submission_metadata: serde_json::Value,
     pub files: Vec<ClaimedJobFile>,
 }
 
@@ -150,8 +155,12 @@ pub struct ClaimedJobFile {
     pub problem_name: Option<String>,
     pub original_filename: String,
     pub safe_filename: String,
+    pub content_sha256: String,
     pub size_bytes: i64,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartedJobRequest {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobEventBatchRequest {

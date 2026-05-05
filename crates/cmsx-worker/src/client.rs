@@ -4,7 +4,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use cmsx_core::{
     ClaimJobRequest, ClaimJobResponse, ClaimedJob, JobEventBatchRequest, JobFailureRequest,
-    JobResultRequest, WorkerHeartbeatRequest, WorkerHeartbeatResponse,
+    JobResultRequest, StartedJobRequest, WorkerHeartbeatRequest, WorkerHeartbeatResponse,
 };
 
 use crate::auth::WorkerSigner;
@@ -54,9 +54,41 @@ impl ControlPlaneClient {
             .await
     }
 
+    pub async fn post_started(&self, job_id: uuid::Uuid) -> Result<()> {
+        self.post_empty(
+            &format!("/workers/jobs/{job_id}/started"),
+            &StartedJobRequest {},
+        )
+        .await
+    }
+
     pub async fn post_failed(&self, job_id: uuid::Uuid, request: &JobFailureRequest) -> Result<()> {
         self.post_empty(&format!("/workers/jobs/{job_id}/failed"), request)
             .await
+    }
+
+    pub async fn get_job_file(
+        &self,
+        job_id: uuid::Uuid,
+        file_id: uuid::Uuid,
+    ) -> Result<bytes::Bytes> {
+        let path = format!("/workers/jobs/{job_id}/files/{file_id}");
+        let auth = self.signer.authorization_header("GET", &path, &[])?;
+
+        let response = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header(reqwest::header::AUTHORIZATION, auth)
+            .send()
+            .await
+            .context("request failed")?
+            .error_for_status()
+            .context("control plane returned error")?;
+
+        response
+            .bytes()
+            .await
+            .context("failed to read response body")
     }
 
     async fn get_json<R>(&self, path: &str) -> Result<R>

@@ -40,8 +40,16 @@ pub fn router(state: AppState) -> Router {
             post(routes::workers::post_result),
         )
         .route(
+            "/workers/jobs/{job_id}/started",
+            post(routes::workers::post_started),
+        )
+        .route(
             "/workers/jobs/{job_id}/failed",
             post(routes::workers::post_failed),
+        )
+        .route(
+            "/workers/jobs/{job_id}/files/{file_id}",
+            get(routes::workers::get_job_file),
         )
         .with_state(state)
         .layer(TraceLayer::new_for_http())
