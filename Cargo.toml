@@ -20,6 +20,7 @@ chrono = { version = "0.4", features = ["serde"] }
 figment = { version = "0.10", features = ["env", "toml"] }
 futures-util = "0.3"
 http-body-util = "0.1"
+indoc = "2"
 jwt-simple = "0.12"
 object_store = { version = "0.13", features = ["aws"] }
 reqwest = { version = "0.13", features = [
