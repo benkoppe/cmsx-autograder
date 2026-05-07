@@ -890,6 +890,7 @@ pub fn classify_result_read_error(
     }
 }
 
+#[allow(dead_code)] // Kept as a pure lifecycle policy helper for focused tests/future wiring.
 pub fn classify_execution_status(status: &ExecutionStatus) -> FailureClassification {
     match status {
         ExecutionStatus::TimedOut => FailureClassification {
@@ -915,6 +916,7 @@ pub fn classify_execution_status(status: &ExecutionStatus) -> FailureClassificat
     }
 }
 
+#[allow(dead_code)] // Kept as a pure lifecycle policy helper for focused tests/future wiring.
 pub fn should_read_result_after_execution(status: &ExecutionStatus) -> bool {
     matches!(status, ExecutionStatus::Exited { .. })
 }

@@ -96,6 +96,7 @@ impl ControlPlaneClient {
         self.post_json("/workers/jobs/claim", request).await
     }
 
+    #[allow(dead_code)] // Protocol helper reserved for future job refresh/reconciliation flows.
     pub async fn get_job(&self, job_id: Uuid) -> ClientResult<ClaimedJob> {
         self.get_json(&format!("/workers/jobs/{job_id}")).await
     }
@@ -157,6 +158,7 @@ impl ControlPlaneClient {
         })
     }
 
+    #[allow(dead_code)] // Used by get_job, which is intentionally retained for future flows.
     async fn get_json<R>(&self, path: &str) -> ClientResult<R>
     where
         R: DeserializeOwned,
