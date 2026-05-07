@@ -19,8 +19,9 @@ use crate::{
     worker::{CancellationReason, apply_cancellation_reason},
     workspace::{
         JobWorkspace, MAX_INPUT_FILE_BYTES, MaterializeInputError, ResultReadError, WorkspaceError,
-        cleanup_attempt_workspace, install_grader_bundle, materialize_input_file_from_async_read,
-        prepare_attempt_workspace, read_bounded_result_json,
+        build_workspace_paths, cleanup_attempt_workspace, install_grader_bundle,
+        materialize_input_file_from_async_read, prepare_attempt_workspace,
+        read_bounded_result_json,
     },
 };
 
@@ -30,6 +31,7 @@ pub const FAILURE_GRADER_MISSING: &str = "grader_missing";
 pub const FAILURE_EXECUTOR_ERROR: &str = "executor_error";
 pub const FAILURE_RESULT_MISSING: &str = "result_missing";
 pub const FAILURE_RESULT_INVALID: &str = "result_invalid";
+pub const FAILURE_CANCELLED_BEFORE_START: &str = "cancelled_before_start";
 pub const FAILURE_TIMEOUT: &str = "timeout";
 pub const FAILURE_LEASE_LOST: &str = "lease_lost";
 pub const FAILURE_WORKSPACE_ERROR: &str = "workspace_error";
@@ -84,20 +86,21 @@ pub async fn run_job(
     let workspace = match workspace_result {
         Ok(workspace) => workspace,
         Err(error) => {
+            if !should_keep_workspaces(&config) {
+                cleanup_after_preparation_failure(&config, &lifecycle.job).await;
+            }
+
             if lifecycle.handle_pre_start_cancellation().await {
                 return Ok(());
             }
 
-            let failure_reason = match error {
-                WorkspaceError::InvalidAttempt(_) => FAILURE_WORKSPACE_ERROR,
-                _ => FAILURE_WORKSPACE_ERROR,
-            };
+            let failure = classify_workspace_preparation_error(&error);
 
             lifecycle
                 .post_failed(
-                    failure_reason,
-                    format_failure_message("workspace preparation failed", &error),
-                    false,
+                    failure.reason,
+                    format_failure_message(failure.message_prefix, &error),
+                    failure.retryable,
                 )
                 .await;
 
@@ -208,16 +211,12 @@ impl JobLifecycle {
         ) {
             Ok(()) => {}
             Err(error) => {
-                let reason = match error {
-                    WorkspaceError::GraderMissing(_) | WorkspaceError::GradePyMissing(_) => {
-                        FAILURE_GRADER_MISSING
-                    }
-                    _ => FAILURE_WORKSPACE_ERROR,
-                };
+                let failure = classify_grader_install_error(&error);
+
                 self.post_failed(
-                    reason,
-                    format_failure_message("failed to install grader bundle", &error),
-                    false,
+                    failure.reason,
+                    format_failure_message(failure.message_prefix, &error),
+                    failure.retryable,
                 )
                 .await;
                 return Ok(());
@@ -303,36 +302,27 @@ impl JobLifecycle {
                         self.post_result(result, Some(output.duration_ms), &output)
                             .await;
                     }
-                    Err(ResultReadError::Missing) => {
-                        let reason = if code.is_none() {
-                            FAILURE_EXECUTOR_ERROR
-                        } else {
-                            FAILURE_RESULT_MISSING
-                        };
-
-                        let message = match code {
-                            Some(code) => format!("result.json missing after grader exit code {code}"),
-                            None => {
+                    Err(error) => {
+                        let failure = classify_result_read_error(&error, code);
+                        let message = match (&error, code) {
+                            (ResultReadError::Missing, Some(code)) => {
+                                format!("result.json missing after grader exit code {code}")
+                            }
+                            (ResultReadError::Missing, None) => {
                                 "result.json missing after process exited without status code; likely signal"
                                     .to_string()
                             }
-                        };
-
-                        self.post_failed(reason, message, false).await;
-                    }
-                    Err(error) => {
-                        let message = match code {
-                            Some(code) => format_failure_message(
+                            (_, Some(code)) => format_failure_message(
                                 &format!("result.json invalid after grader exit code {code}"),
                                 &error,
                             ),
-                            None => format_failure_message(
+                            (_, None) => format_failure_message(
                                 "result.json invalid after process exited without status code",
                                 &error,
                             ),
                         };
 
-                        self.post_failed(FAILURE_RESULT_INVALID, message, false)
+                        self.post_failed(failure.reason, message, failure.retryable)
                             .await;
                     }
                 }
@@ -408,10 +398,11 @@ impl JobLifecycle {
                 }
             },
             MaterializeInputError::HashMismatch { .. } => {
+                let failure = classify_materialize_error(&error);
                 self.post_failed(
-                    FAILURE_INPUT_HASH,
-                    format_failure_message("input file hash mismatch", &error),
-                    false,
+                    failure.reason,
+                    format_failure_message(failure.message_prefix, &error),
+                    failure.retryable,
                 )
                 .await;
             }
@@ -423,10 +414,11 @@ impl JobLifecycle {
             | MaterializeInputError::InvalidExpectedSize(_)
             | MaterializeInputError::Io(_)
             | MaterializeInputError::Other(_) => {
+                let failure = classify_materialize_error(&error);
                 self.post_failed(
-                    FAILURE_INPUT_DOWNLOAD,
-                    format_failure_message("input file materialization failed", &error),
-                    false,
+                    failure.reason,
+                    format_failure_message(failure.message_prefix, &error),
+                    failure.retryable,
                 )
                 .await;
             }
@@ -697,6 +689,196 @@ fn should_keep_workspaces(config: &WorkerConfig) -> bool {
     config.executor.keep_workspaces()
 }
 
+async fn cleanup_after_preparation_failure(config: &WorkerConfig, job: &ClaimedJob) {
+    let Ok(workspace) = build_workspace_paths(config.executor.workspace_root(), job) else {
+        return;
+    };
+
+    if let Err(error) = cleanup_attempt_workspace(&workspace).await {
+        tracing::warn!(
+            job_id = %job.id,
+            path = %workspace.root.display(),
+            ?error,
+            "failed to cleanup workspace after preparation failure"
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FailureClassification {
+    pub reason: &'static str,
+    pub message_prefix: &'static str,
+    pub retryable: bool,
+}
+
+pub fn classify_workspace_preparation_error(error: &WorkspaceError) -> FailureClassification {
+    match error {
+        WorkspaceError::InvalidAttempt(_) => FailureClassification {
+            reason: FAILURE_WORKSPACE_ERROR,
+            message_prefix: "invalid claimed job metadata",
+            retryable: false,
+        },
+        WorkspaceError::Io(_) => FailureClassification {
+            reason: FAILURE_WORKSPACE_ERROR,
+            message_prefix: "workspace preparation failed",
+            retryable: false,
+        },
+        WorkspaceError::Json(_) => FailureClassification {
+            reason: FAILURE_WORKSPACE_ERROR,
+            message_prefix: "workspace metadata writing failed",
+            retryable: false,
+        },
+        WorkspaceError::InvalidSafeComponent(_)
+        | WorkspaceError::GraderMissing(_)
+        | WorkspaceError::GradePyMissing(_)
+        | WorkspaceError::GraderDestinationNotEmpty(_)
+        | WorkspaceError::GraderSymlink(_)
+        | WorkspaceError::GraderUnsupportedFileType(_)
+        | WorkspaceError::InvalidTrustedPath(_)
+        | WorkspaceError::ResultMissing
+        | WorkspaceError::ResultTooLarge { .. }
+        | WorkspaceError::ResultInvalid(_) => FailureClassification {
+            reason: FAILURE_WORKSPACE_ERROR,
+            message_prefix: "workspace preparation failed",
+            retryable: false,
+        },
+    }
+}
+
+pub fn classify_grader_install_error(error: &WorkspaceError) -> FailureClassification {
+    match error {
+        WorkspaceError::GraderMissing(_)
+        | WorkspaceError::GradePyMissing(_)
+        | WorkspaceError::GraderSymlink(_)
+        | WorkspaceError::GraderUnsupportedFileType(_) => FailureClassification {
+            reason: FAILURE_GRADER_MISSING,
+            message_prefix: "grader bundle is invalid or missing",
+            retryable: false,
+        },
+        WorkspaceError::GraderDestinationNotEmpty(_)
+        | WorkspaceError::InvalidTrustedPath(_)
+        | WorkspaceError::InvalidSafeComponent(_) => FailureClassification {
+            reason: FAILURE_WORKSPACE_ERROR,
+            message_prefix: "grader workspace setup failed",
+            retryable: false,
+        },
+        WorkspaceError::Io(_) => FailureClassification {
+            reason: FAILURE_WORKSPACE_ERROR,
+            message_prefix: "grader bundle copy failed",
+            retryable: false,
+        },
+        WorkspaceError::Json(_)
+        | WorkspaceError::InvalidAttempt(_)
+        | WorkspaceError::ResultMissing
+        | WorkspaceError::ResultTooLarge { .. }
+        | WorkspaceError::ResultInvalid(_) => FailureClassification {
+            reason: FAILURE_WORKSPACE_ERROR,
+            message_prefix: "unexpected grader workspace error",
+            retryable: false,
+        },
+    }
+}
+
+pub fn classify_materialize_error(error: &MaterializeInputError) -> FailureClassification {
+    match error {
+        MaterializeInputError::HashMismatch { .. } => FailureClassification {
+            reason: FAILURE_INPUT_HASH,
+            message_prefix: "input file hash mismatch",
+            retryable: false,
+        },
+        MaterializeInputError::InvalidExpectedHash(_) => FailureClassification {
+            reason: FAILURE_INPUT_DOWNLOAD,
+            message_prefix: "bad input hash metadata from control plane",
+            retryable: false,
+        },
+        MaterializeInputError::SizeMismatch { .. } => FailureClassification {
+            reason: FAILURE_INPUT_DOWNLOAD,
+            message_prefix: "input file size mismatch",
+            retryable: false,
+        },
+        MaterializeInputError::TooLarge { .. } => FailureClassification {
+            reason: FAILURE_INPUT_DOWNLOAD,
+            message_prefix: "input file exceeds worker size limit",
+            retryable: false,
+        },
+        MaterializeInputError::InvalidFilename(_) => FailureClassification {
+            reason: FAILURE_INPUT_DOWNLOAD,
+            message_prefix: "invalid input filename",
+            retryable: false,
+        },
+        MaterializeInputError::FinalPathExists(_) => FailureClassification {
+            reason: FAILURE_INPUT_DOWNLOAD,
+            message_prefix: "input final path already exists",
+            retryable: false,
+        },
+        MaterializeInputError::InvalidExpectedSize(_) => FailureClassification {
+            reason: FAILURE_INPUT_DOWNLOAD,
+            message_prefix: "bad input size metadata from control plane",
+            retryable: false,
+        },
+        MaterializeInputError::Io(_) | MaterializeInputError::Other(_) => FailureClassification {
+            reason: FAILURE_INPUT_DOWNLOAD,
+            message_prefix: "input file materialization failed",
+            retryable: false,
+        },
+        MaterializeInputError::Cancelled => FailureClassification {
+            reason: FAILURE_CANCELLED_BEFORE_START,
+            message_prefix: "input materialization cancelled",
+            retryable: false,
+        },
+    }
+}
+
+pub fn classify_result_read_error(
+    error: &ResultReadError,
+    process_code: Option<i32>,
+) -> FailureClassification {
+    match error {
+        ResultReadError::Missing if process_code.is_none() => FailureClassification {
+            reason: FAILURE_EXECUTOR_ERROR,
+            message_prefix: "process exited without status code and result.json is missing",
+            retryable: false,
+        },
+        ResultReadError::Missing => FailureClassification {
+            reason: FAILURE_RESULT_MISSING,
+            message_prefix: "result.json is missing",
+            retryable: false,
+        },
+        ResultReadError::TooLarge { .. }
+        | ResultReadError::Io(_)
+        | ResultReadError::InvalidJson(_) => FailureClassification {
+            reason: FAILURE_RESULT_INVALID,
+            message_prefix: "result.json is invalid",
+            retryable: false,
+        },
+    }
+}
+
+pub fn classify_execution_status(status: &ExecutionStatus) -> FailureClassification {
+    match status {
+        ExecutionStatus::TimedOut => FailureClassification {
+            reason: FAILURE_TIMEOUT,
+            message_prefix: "job timed out",
+            retryable: false,
+        },
+        ExecutionStatus::Cancelled => FailureClassification {
+            reason: FAILURE_CANCELLED_BEFORE_START,
+            message_prefix: "job cancelled",
+            retryable: false,
+        },
+        ExecutionStatus::Exited { code: None } => FailureClassification {
+            reason: FAILURE_EXECUTOR_ERROR,
+            message_prefix: "process exited without status code",
+            retryable: false,
+        },
+        ExecutionStatus::Exited { code: Some(_) } => FailureClassification {
+            reason: FAILURE_RESULT_MISSING,
+            message_prefix: "grader exited without a valid result",
+            retryable: false,
+        },
+    }
+}
+
 fn explicit_cancelled_result() -> GradingResult {
     GradingResult {
         schema_version: "1".to_string(),
@@ -770,5 +952,98 @@ mod tests {
         assert_eq!(result.feedback.as_deref(), Some("Job cancelled"));
         assert!(result.tests.is_empty());
         assert!(result.artifacts.is_empty());
+    }
+
+    #[test]
+    fn workspace_preparation_invalid_attempt_is_workspace_error() {
+        let error = WorkspaceError::InvalidAttempt(0);
+        let classification = classify_workspace_preparation_error(&error);
+
+        assert_eq!(classification.reason, FAILURE_WORKSPACE_ERROR);
+        assert!(!classification.retryable);
+    }
+
+    #[test]
+    fn grader_missing_maps_to_grader_missing() {
+        let error = WorkspaceError::GraderMissing("missing".to_string());
+        let classification = classify_grader_install_error(&error);
+
+        assert_eq!(classification.reason, FAILURE_GRADER_MISSING);
+        assert!(!classification.retryable);
+    }
+
+    #[test]
+    fn grader_symlink_maps_to_grader_missing() {
+        let error = WorkspaceError::GraderSymlink("linked.py".to_string());
+        let classification = classify_grader_install_error(&error);
+
+        assert_eq!(classification.reason, FAILURE_GRADER_MISSING);
+        assert!(!classification.retryable);
+    }
+
+    #[test]
+    fn materialize_hash_mismatch_maps_to_input_hash() {
+        let error = MaterializeInputError::HashMismatch {
+            expected: "expected".to_string(),
+            actual: "actual".to_string(),
+        };
+        let classification = classify_materialize_error(&error);
+
+        assert_eq!(classification.reason, FAILURE_INPUT_HASH);
+        assert!(!classification.retryable);
+    }
+
+    #[test]
+    fn materialize_invalid_expected_hash_maps_to_download_failure() {
+        let error = MaterializeInputError::InvalidExpectedHash("bad".to_string());
+        let classification = classify_materialize_error(&error);
+
+        assert_eq!(classification.reason, FAILURE_INPUT_DOWNLOAD);
+        assert!(classification.message_prefix.contains("metadata"));
+        assert!(!classification.retryable);
+    }
+
+    #[test]
+    fn result_missing_after_signal_maps_to_executor_error() {
+        let error = ResultReadError::Missing;
+        let classification = classify_result_read_error(&error, None);
+
+        assert_eq!(classification.reason, FAILURE_EXECUTOR_ERROR);
+        assert!(!classification.retryable);
+    }
+
+    #[test]
+    fn result_missing_after_exit_code_maps_to_result_missing() {
+        let error = ResultReadError::Missing;
+        let classification = classify_result_read_error(&error, Some(1));
+
+        assert_eq!(classification.reason, FAILURE_RESULT_MISSING);
+        assert!(!classification.retryable);
+    }
+
+    #[test]
+    fn invalid_result_maps_to_result_invalid() {
+        let error = serde_json::from_str::<GradingResult>("not-json").unwrap_err();
+        let classification =
+            classify_result_read_error(&ResultReadError::InvalidJson(error), Some(0));
+
+        assert_eq!(classification.reason, FAILURE_RESULT_INVALID);
+        assert!(!classification.retryable);
+    }
+
+    #[test]
+    fn timeout_status_maps_to_timeout() {
+        let classification = classify_execution_status(&ExecutionStatus::TimedOut);
+
+        assert_eq!(classification.reason, FAILURE_TIMEOUT);
+        assert!(!classification.retryable);
+    }
+
+    #[test]
+    fn signal_exit_status_maps_to_executor_error() {
+        let classification = classify_execution_status(&ExecutionStatus::Exited { code: None });
+
+        assert_eq!(classification.reason, FAILURE_EXECUTOR_ERROR);
+        assert!(!classification.retryable);
     }
 }
