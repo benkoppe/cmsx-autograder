@@ -9,16 +9,13 @@ use std::{
 };
 
 use indoc::indoc;
-use serde_json::{Value, json};
-use tempfile::TempDir;
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
-use cmsx_core::{ClaimedJob, GradingResult, ResultStatus};
+use cmsx_core::{ClaimedJob, ResultStatus};
 use cmsx_worker::{
     config::InWorkerExecutorConfig,
     executor::{ExecutionStatus, InWorkerExecutor},
-    workspace::JobWorkspace,
 };
 
 struct InWorkerFixture {

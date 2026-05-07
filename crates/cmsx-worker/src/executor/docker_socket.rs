@@ -428,8 +428,6 @@ fn connect_docker(docker_host: Option<&str>) -> Result<Docker> {
 
 #[cfg(test)]
 mod tests {
-    use crate::executor::utils::DEFAULT_TIMEOUT_SECONDS;
-
     use super::*;
 
     use serde_json::json;

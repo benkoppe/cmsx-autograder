@@ -53,6 +53,7 @@ impl ExecutorFixture {
         }
     }
 
+    #[allow(dead_code)]
     pub fn temp_path(&self) -> &Path {
         self._temp.path()
     }
@@ -98,6 +99,7 @@ impl ExecutorFixture {
     }
 }
 
+#[allow(dead_code)]
 pub fn sdk_src_path() -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
