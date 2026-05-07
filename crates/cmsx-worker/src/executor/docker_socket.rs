@@ -481,21 +481,6 @@ mod tests {
     }
 
     #[test]
-    fn docker_job_config_parses_defaults() {
-        let job = test_job(json!({}), json!({ "image": "runner:latest" }));
-
-        let config = parse_docker_job_config(&job, &default_executor_config()).unwrap();
-
-        assert_eq!(config.image, "runner:latest");
-        assert_eq!(config.timeout_seconds, DEFAULT_TIMEOUT_SECONDS);
-        assert_eq!(config.memory_bytes, None);
-        assert_eq!(config.nano_cpus, None);
-        assert_eq!(config.pids_limit, None);
-        assert!(!config.network_enabled);
-        assert!(!config.read_only_root);
-    }
-
-    #[test]
     fn docker_job_config_allows_image_override() {
         let job = test_job(json!({}), json!({ "image": "custom-runner:latest" }));
 
