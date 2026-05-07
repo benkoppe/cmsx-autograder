@@ -18,9 +18,9 @@ use crate::{
     executor::{ExecutionOutput, ExecutionStatus, Executor},
     worker::{CancellationReason, apply_cancellation_reason},
     workspace::{
-        JobWorkspace, MAX_INPUT_FILE_BYTES, MaterializeInputError, ResultReadError, WorkspaceError,
-        build_workspace_paths, cleanup_attempt_workspace, install_grader_bundle,
-        materialize_input_file_from_async_read, prepare_attempt_workspace,
+        JobWorkspace, MAX_INPUT_FILE_BYTES, MaterializeInputError, MaterializeInputFileRequest,
+        ResultReadError, WorkspaceError, build_workspace_paths, cleanup_attempt_workspace,
+        install_grader_bundle, materialize_input_file_from_async_read, prepare_attempt_workspace,
         read_bounded_result_json,
     },
 };
@@ -181,13 +181,15 @@ impl JobLifecycle {
 
             let result = materialize_input_file_from_async_read(
                 download.reader,
-                &workspace.files_dir,
-                file.id,
-                &file.safe_filename,
-                file.size_bytes,
-                &file.content_sha256,
-                MAX_INPUT_FILE_BYTES,
-                self.cancel.clone(),
+                MaterializeInputFileRequest {
+                    files_dir: &workspace.files_dir,
+                    file_id: file.id,
+                    safe_filename: &file.safe_filename,
+                    expected_size_bytes: file.size_bytes,
+                    expected_sha256: &file.content_sha256,
+                    max_bytes: MAX_INPUT_FILE_BYTES,
+                    cancel: self.cancel.clone(),
+                },
             )
             .await;
 

@@ -230,41 +230,47 @@ fn metadata_file(file: &ClaimedJobFile) -> MetadataFile<'_> {
     }
 }
 
+pub struct MaterializeInputFileRequest<'a> {
+    pub files_dir: &'a Path,
+    pub file_id: Uuid,
+    pub safe_filename: &'a str,
+    pub expected_size_bytes: i64,
+    pub expected_sha256: &'a str,
+    pub max_bytes: u64,
+    pub cancel: CancellationToken,
+}
+
 pub async fn materialize_input_file_from_async_read<R>(
     mut reader: R,
-    files_dir: &Path,
-    file_id: Uuid,
-    safe_filename: &str,
-    expected_size_bytes: i64,
-    expected_sha256: &str,
-    max_bytes: u64,
-    cancel: CancellationToken,
+    request: MaterializeInputFileRequest<'_>,
 ) -> Result<(), MaterializeInputError>
 where
     R: AsyncRead + Unpin,
 {
-    validate_safe_component(safe_filename)
+    validate_safe_component(request.safe_filename)
         .map_err(|error| MaterializeInputError::InvalidFilename(error.to_string()))?;
 
-    if expected_size_bytes < 0 {
+    if request.expected_size_bytes < 0 {
         return Err(MaterializeInputError::InvalidExpectedSize(
-            expected_size_bytes,
+            request.expected_size_bytes,
         ));
     }
 
-    let expected_size = expected_size_bytes as u64;
+    let expected_size = request.expected_size_bytes as u64;
 
-    if expected_size > max_bytes {
+    if expected_size > request.max_bytes {
         return Err(MaterializeInputError::TooLarge {
-            max: max_bytes,
+            max: request.max_bytes,
             actual: expected_size,
         });
     }
 
-    validate_expected_sha256(expected_sha256)?;
+    validate_expected_sha256(request.expected_sha256)?;
 
-    let temp_path = files_dir.join(format!(".download-{file_id}.tmp"));
-    let final_path = files_dir.join(safe_filename);
+    let temp_path = request
+        .files_dir
+        .join(format!(".download-{}.tmp", request.file_id));
+    let final_path = request.files_dir.join(request.safe_filename);
 
     if final_path.exists() {
         return Err(MaterializeInputError::FinalPathExists(
@@ -280,9 +286,9 @@ where
         &mut reader,
         &temp_path,
         expected_size,
-        expected_sha256,
-        max_bytes,
-        cancel,
+        request.expected_sha256,
+        request.max_bytes,
+        request.cancel,
     )
     .await;
 
@@ -662,6 +668,23 @@ mod tests {
         );
     }
 
+    fn materialize_request<'a>(
+        temp: &'a TempDir,
+        file_id: Uuid,
+        expected_size_bytes: i64,
+        cancel: CancellationToken,
+    ) -> MaterializeInputFileRequest<'a> {
+        MaterializeInputFileRequest {
+            files_dir: temp.path(),
+            file_id,
+            safe_filename: "hello.py",
+            expected_size_bytes,
+            expected_sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+            max_bytes: MAX_INPUT_FILE_BYTES,
+            cancel,
+        }
+    }
+
     #[tokio::test]
     async fn materialization_writes_temp_then_final() {
         let temp = TempDir::new().unwrap();
@@ -669,13 +692,15 @@ mod tests {
 
         materialize_input_file_from_async_read(
             &b"hello"[..],
-            temp.path(),
-            file_id,
-            "hello.py",
-            5,
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
-            MAX_INPUT_FILE_BYTES,
-            CancellationToken::new(),
+            MaterializeInputFileRequest {
+                files_dir: temp.path(),
+                file_id,
+                safe_filename: "hello.py",
+                expected_size_bytes: 5,
+                expected_sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+                max_bytes: MAX_INPUT_FILE_BYTES,
+                cancel: CancellationToken::new(),
+            },
         )
         .await
         .unwrap();
@@ -702,13 +727,15 @@ mod tests {
 
         materialize_input_file_from_async_read(
             &b"hello"[..],
-            temp.path(),
-            file_id,
-            "hello.py",
-            5,
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
-            MAX_INPUT_FILE_BYTES,
-            CancellationToken::new(),
+            MaterializeInputFileRequest {
+                files_dir: temp.path(),
+                file_id,
+                safe_filename: "hello.py",
+                expected_size_bytes: 5,
+                expected_sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+                max_bytes: MAX_INPUT_FILE_BYTES,
+                cancel: CancellationToken::new(),
+            },
         )
         .await
         .unwrap();
@@ -727,13 +754,7 @@ mod tests {
 
         let error = materialize_input_file_from_async_read(
             &b"hello"[..],
-            temp.path(),
-            file_id,
-            "hello.py",
-            5,
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
-            MAX_INPUT_FILE_BYTES,
-            CancellationToken::new(),
+            materialize_request(&temp, file_id, 5, CancellationToken::new()),
         )
         .await
         .unwrap_err();
@@ -748,13 +769,7 @@ mod tests {
 
         let error = materialize_input_file_from_async_read(
             &b"hello"[..],
-            temp.path(),
-            file_id,
-            "hello.py",
-            -1,
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
-            MAX_INPUT_FILE_BYTES,
-            CancellationToken::new(),
+            materialize_request(&temp, file_id, -1, CancellationToken::new()),
         )
         .await
         .unwrap_err();
@@ -772,13 +787,7 @@ mod tests {
 
         let error = materialize_input_file_from_async_read(
             &b"hello"[..],
-            temp.path(),
-            file_id,
-            "hello.py",
-            65 * 1024 * 1024,
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
-            MAX_INPUT_FILE_BYTES,
-            CancellationToken::new(),
+            materialize_request(&temp, file_id, 65 * 1024 * 1024, CancellationToken::new()),
         )
         .await
         .unwrap_err();
@@ -793,13 +802,7 @@ mod tests {
 
         let error = materialize_input_file_from_async_read(
             &b"hello!"[..],
-            temp.path(),
-            file_id,
-            "hello.py",
-            5,
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
-            MAX_INPUT_FILE_BYTES,
-            CancellationToken::new(),
+            materialize_request(&temp, file_id, 5, CancellationToken::new()),
         )
         .await
         .unwrap_err();
@@ -814,13 +817,7 @@ mod tests {
 
         let error = materialize_input_file_from_async_read(
             &b"HELLO"[..],
-            temp.path(),
-            file_id,
-            "hello.py",
-            5,
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
-            MAX_INPUT_FILE_BYTES,
-            CancellationToken::new(),
+            materialize_request(&temp, file_id, 5, CancellationToken::new()),
         )
         .await
         .unwrap_err();
@@ -837,13 +834,7 @@ mod tests {
 
         let error = materialize_input_file_from_async_read(
             &b"hello"[..],
-            temp.path(),
-            file_id,
-            "hello.py",
-            5,
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
-            MAX_INPUT_FILE_BYTES,
-            cancel,
+            materialize_request(&temp, file_id, 5, cancel),
         )
         .await
         .unwrap_err();
