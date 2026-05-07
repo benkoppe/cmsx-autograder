@@ -17,7 +17,7 @@ use cmsx_core::{ClaimJobRequest, WorkerHeartbeatRequest, WorkerHeartbeatResponse
 use crate::{
     auth::WorkerSigner,
     capacity,
-    client::{ClientError, ControlPlaneClient},
+    client::ControlPlaneClient,
     config::{ExecutorConfig, WorkerConfig},
     executor::{Executor, InWorkerExecutor},
     job_runner,
@@ -278,10 +278,6 @@ async fn claim_loop(
             });
         }
     }
-}
-
-pub fn client_error_status(error: &ClientError) -> Option<reqwest::StatusCode> {
-    error.status()
 }
 
 #[cfg(test)]

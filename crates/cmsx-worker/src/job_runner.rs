@@ -775,10 +775,7 @@ pub fn classify_workspace_preparation_error(error: &WorkspaceError) -> FailureCl
         | WorkspaceError::GraderDestinationNotEmpty(_)
         | WorkspaceError::GraderSymlink(_)
         | WorkspaceError::GraderUnsupportedFileType(_)
-        | WorkspaceError::InvalidTrustedPath(_)
-        | WorkspaceError::ResultMissing
-        | WorkspaceError::ResultTooLarge { .. }
-        | WorkspaceError::ResultInvalid(_) => FailureClassification {
+        | WorkspaceError::InvalidTrustedPath(_) => FailureClassification {
             reason: FAILURE_WORKSPACE_ERROR,
             message_prefix: "workspace preparation failed",
             retryable: false,
@@ -808,11 +805,7 @@ pub fn classify_grader_install_error(error: &WorkspaceError) -> FailureClassific
             message_prefix: "grader bundle copy failed",
             retryable: false,
         },
-        WorkspaceError::Json(_)
-        | WorkspaceError::InvalidAttempt(_)
-        | WorkspaceError::ResultMissing
-        | WorkspaceError::ResultTooLarge { .. }
-        | WorkspaceError::ResultInvalid(_) => FailureClassification {
+        WorkspaceError::Json(_) | WorkspaceError::InvalidAttempt(_) => FailureClassification {
             reason: FAILURE_WORKSPACE_ERROR,
             message_prefix: "unexpected grader workspace error",
             retryable: false,

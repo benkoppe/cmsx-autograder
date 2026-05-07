@@ -49,12 +49,6 @@ pub enum WorkspaceError {
     GraderUnsupportedFileType(String),
     #[error("invalid grader/workspace path: {0}")]
     InvalidTrustedPath(String),
-    #[error("result.json is missing")]
-    ResultMissing,
-    #[error("result.json is too large: max {max}, actual {actual}")]
-    ResultTooLarge { max: u64, actual: u64 },
-    #[error("result.json is invalid: {0}")]
-    ResultInvalid(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
