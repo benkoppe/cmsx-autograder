@@ -204,7 +204,73 @@ pub fn cap_summary_string(mut value: String, truncated: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
+
     use serde_json::json;
+    use tempfile::TempDir;
+    use tokio_util::sync::CancellationToken;
+    use uuid::Uuid;
+
+    use cmsx_core::ClaimedJob;
+
+    fn test_job(timeout_seconds: u64) -> ClaimedJob {
+        ClaimedJob {
+            id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+            submission_id: Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
+            assignment_id: Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap(),
+            assignment_slug: "intro".to_string(),
+            lease_expires_at: chrono::Utc::now(),
+            attempt: 1,
+            execution_config: json!({ "timeout_seconds": timeout_seconds }),
+            runner_config: json!({}),
+            capabilities: json!({}),
+            submission_metadata: json!({}),
+            files: Vec::new(),
+        }
+    }
+
+    fn test_workspace(temp: &TempDir) -> JobWorkspace {
+        let root = temp.path().join("job");
+
+        let workspace = JobWorkspace {
+            root: root.clone(),
+            input_dir: root.join("input"),
+            files_dir: root.join("input/files"),
+            grader_dir: root.join("grader"),
+            work_dir: root.join("work"),
+            output_dir: root.join("output"),
+            artifacts_dir: root.join("output/artifacts"),
+            result_path: root.join("output/result.json"),
+        };
+
+        fs::create_dir_all(&workspace.files_dir).unwrap();
+        fs::create_dir_all(&workspace.grader_dir).unwrap();
+        fs::create_dir_all(&workspace.work_dir).unwrap();
+        fs::create_dir_all(&workspace.artifacts_dir).unwrap();
+        fs::write(workspace.grader_dir.join("grade.py"), "print('unused')").unwrap();
+
+        workspace
+    }
+
+    #[cfg(unix)]
+    fn write_executable_script(path: &Path, contents: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(path, contents).unwrap();
+
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn script_path(temp: &TempDir, name: &str) -> PathBuf {
+        temp.path().join(name)
+    }
 
     #[test]
     fn timeout_missing_defaults() {
@@ -256,5 +322,102 @@ mod tests {
 
         assert!(capped.len() <= SUMMARY_MAX_BYTES);
         assert!(capped.ends_with(TRUNCATION_MARKER));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn subprocess_timeout_kills_and_reaps() {
+        let temp = TempDir::new().unwrap();
+        let workspace = test_workspace(&temp);
+        let command = script_path(&temp, "fake-python-timeout.sh");
+
+        write_executable_script(
+            &command,
+            r#"#!/bin/sh
+            sleep 10
+            "#,
+        );
+
+        let executor = InWorkerExecutor {
+            python_command: command.display().to_string(),
+        };
+
+        let output = executor
+            .run(&test_job(1), &workspace, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert!(matches!(output.status, ExecutionStatus::TimedOut));
+        assert!(output.duration_ms >= 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn subprocess_cancellation_kills_and_reaps() {
+        let temp = TempDir::new().unwrap();
+        let workspace = test_workspace(&temp);
+        let command = script_path(&temp, "fake-python-cancel.sh");
+
+        write_executable_script(
+            &command,
+            r#"#!/bin/sh
+            sleep 10
+            "#,
+        );
+
+        let executor = InWorkerExecutor {
+            python_command: command.display().to_string(),
+        };
+
+        let cancel = CancellationToken::new();
+        let cancel_for_task = cancel.clone();
+
+        let cancel_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            cancel_for_task.cancel();
+        });
+
+        let output = executor
+            .run(&test_job(60), &workspace, cancel)
+            .await
+            .unwrap();
+
+        cancel_task.await.unwrap();
+
+        assert!(matches!(output.status, ExecutionStatus::Cancelled));
+        assert!(output.duration_ms >= 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn subprocess_exit_captures_stdout_and_stderr() {
+        let temp = TempDir::new().unwrap();
+        let workspace = test_workspace(&temp);
+        let command = script_path(&temp, "fake-python-output.sh");
+
+        write_executable_script(
+            &command,
+            r#"#!/bin/sh
+            printf 'hello stdout'
+            printf 'hello stderr' >&2
+            exit 7
+            "#,
+        );
+
+        let executor = InWorkerExecutor {
+            python_command: command.display().to_string(),
+        };
+
+        let output = executor
+            .run(&test_job(60), &workspace, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            output.status,
+            ExecutionStatus::Exited { code: Some(7) }
+        ));
+        assert_eq!(output.stdout_summary.as_deref(), Some("hello stdout"));
+        assert_eq!(output.stderr_summary.as_deref(), Some("hello stderr"));
     }
 }

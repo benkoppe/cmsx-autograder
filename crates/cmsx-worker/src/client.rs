@@ -1,7 +1,6 @@
 use std::{fmt, pin::Pin};
 
-use anyhow::{Context, Result};
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use reqwest::{Client, StatusCode};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::io::AsyncRead;
@@ -175,6 +174,8 @@ impl ControlPlaneClient {
             .await
             .map_err(ClientError::Request)?;
 
+        let response = ensure_success(response).await?;
+
         response
             .json()
             .await
@@ -253,18 +254,37 @@ async fn ensure_success(response: reqwest::Response) -> ClientResult<reqwest::Re
 }
 
 async fn read_bounded_error_body(response: reqwest::Response) -> String {
-    match response.bytes().await {
-        Ok(bytes) => {
-            let bounded = if bytes.len() > ERROR_BODY_MAX_BYTES {
-                &bytes[..ERROR_BODY_MAX_BYTES]
-            } else {
-                &bytes
-            };
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
 
-            String::from_utf8_lossy(bounded).into_owned()
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                if bytes.is_empty() {
+                    return format!("failed to read error body: {error}");
+                }
+
+                tracing::warn!(?error, "failed to finish reading error body");
+                break;
+            }
+        };
+
+        let remaining = ERROR_BODY_MAX_BYTES.saturating_sub(bytes.len());
+
+        if remaining == 0 {
+            break;
         }
-        Err(error) => format!("failed to read error body: {error}"),
+
+        if chunk.len() <= remaining {
+            bytes.extend_from_slice(&chunk);
+        } else {
+            bytes.extend_from_slice(&chunk[..remaining]);
+            break;
+        }
     }
+
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 pub fn cap_message_bytes(value: &str, max_bytes: usize) -> String {
