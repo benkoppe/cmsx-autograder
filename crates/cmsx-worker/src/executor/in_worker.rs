@@ -1,11 +1,10 @@
-use std::{process::Stdio, sync::Arc, time::Instant};
+use std::{process::Stdio, time::Instant};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::Command,
-    sync::Mutex,
     task::JoinHandle,
     time::{Duration, timeout},
 };
