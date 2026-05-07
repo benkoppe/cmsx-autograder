@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO workers (\n            id,\n            name,\n            status,\n            version,\n            created_at,\n            last_seen_at\n        )\n        VALUES ($1, $2, 'offline', NULL, $3, NULL)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f08073ac75a9680bc4f7e80317fa2e037a78d719b482c72effeeeefffc7b19c4"
+}
