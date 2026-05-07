@@ -60,8 +60,7 @@ pub struct DockerJobConfig {
 
 impl DockerSocketExecutor {
     pub fn new(config: &DockerSocketExecutorConfig) -> Result<Self> {
-        let docker = Docker::connect_with_local_defaults()
-            .context("failed to connect to local Docker daemon")?;
+        let docker = connect_docker(config.docker_host.as_deref())?;
 
         Ok(Self {
             docker,
@@ -417,6 +416,16 @@ async fn join_logs(task: JoinHandle<OutputSummaries>) -> OutputSummaries {
     }
 }
 
+fn connect_docker(docker_host: Option<&str>) -> Result<Docker> {
+    if let Some(docker_host) = docker_host.map(str::trim).filter(|host| !host.is_empty()) {
+        return Docker::connect_with_host(docker_host)
+            .with_context(|| format!("failed to connect to Docker daemon at {docker_host}"));
+    }
+
+    Docker::connect_with_defaults()
+        .context("failed to connect to Docker daemon; set executor.docker_host or DOCKER_HOST")
+}
+
 #[cfg(test)]
 mod tests {
     use crate::executor::utils::DEFAULT_TIMEOUT_SECONDS;
@@ -451,6 +460,7 @@ mod tests {
             grader_root: "examples/assignments".into(),
             max_jobs: Some(1),
             keep_workspaces: false,
+            docker_host: None,
             default_image: "cmsx-runner-python:latest".to_string(),
             default_timeout_seconds: Some(60),
             default_memory_mb: Some(512),

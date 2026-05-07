@@ -28,6 +28,7 @@ pub struct DockerSocketExecutorConfig {
     pub grader_root: PathBuf,
     pub max_jobs: Option<usize>,
     pub keep_workspaces: bool,
+    pub docker_host: Option<String>,
 
     pub default_image: String,
     pub default_timeout_seconds: Option<u64>,
@@ -140,6 +141,9 @@ impl ExecutorConfig {
 
 impl DockerSocketExecutorConfig {
     fn validate(&self) -> Result<()> {
+        if matches!(self.docker_host.as_deref(), Some(host) if host.trim().is_empty()) {
+            bail!("executor.docker_host must not be empty when set");
+        }
         if self.default_image.trim().is_empty() {
             bail!("executor.default_image must not be empty");
         }

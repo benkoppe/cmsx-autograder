@@ -15,12 +15,29 @@ use cmsx_worker::{
 
 use common::ExecutorFixture;
 
+fn test_docker_host() -> Option<String> {
+    std::env::var("CMSX_DOCKER_TEST_HOST")
+        .ok()
+        .or_else(|| std::env::var("DOCKER_HOST").ok())
+}
+
+fn connect_test_docker() -> Docker {
+    if let Some(docker_host) = test_docker_host() {
+        Docker::connect_with_host(&docker_host)
+            .unwrap_or_else(|error| panic!("failed to connect to Docker at {docker_host}: {error}"))
+    } else {
+        Docker::connect_with_defaults()
+            .expect("failed to connect to Docker; set CMSX_DOCKER_TEST_HOST or DOCKER_HOST")
+    }
+}
+
 fn docker_config(fixture: &ExecutorFixture) -> DockerSocketExecutorConfig {
     DockerSocketExecutorConfig {
         workspace_root: fixture.workspace.root.clone(),
         grader_root: fixture.workspace.grader_dir.clone(),
         max_jobs: Some(1),
         keep_workspaces: false,
+        docker_host: test_docker_host(),
         default_image: std::env::var("CMSX_DOCKER_TEST_IMAGE")
             .unwrap_or_else(|_| "cmsx-runner-python:latest".to_string()),
         default_timeout_seconds: Some(60),
@@ -33,14 +50,13 @@ fn docker_config(fixture: &ExecutorFixture) -> DockerSocketExecutorConfig {
 }
 
 async fn require_runner_image(image: &str) {
-    let docker =
-        Docker::connect_with_local_defaults().expect("failed to connect to local Docker daemon");
+    let docker = connect_test_docker();
 
     docker.inspect_image(image).await.unwrap_or_else(|error| {
         panic!(
             "Docker test image {image:?} is not available: {error:?}\n\
-                 Build/load it first with: nix run .#load-cmsx-runner-python\n\
-                 Or set CMSX_DOCKER_TEST_IMAGE to another image."
+             Build/load it first with: nix run .#load-cmsx-runner-python\n\
+             Or set CMSX_DOCKER_TEST_IMAGE to another image."
         )
     });
 }
