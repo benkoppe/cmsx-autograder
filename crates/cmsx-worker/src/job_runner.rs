@@ -252,12 +252,14 @@ impl JobLifecycle {
             }
         }
 
+        let executor_backend = executor.backend_name();
+
         self.post_event(
             "executor.started",
             "worker",
             "staff",
             "Executor started",
-            json!({ "backend": "in-worker" }),
+            json!({ "backend": executor_backend }),
         )
         .await;
 

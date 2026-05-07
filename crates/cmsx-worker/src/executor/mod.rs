@@ -45,4 +45,11 @@ impl Executor {
             Self::InWorker(executor) => executor.run(job, workspace, cancel).await,
         }
     }
+
+    pub fn backend_name(&self) -> &'static str {
+        match self {
+            Self::DockerSocket(_) => "docker-socket",
+            Self::InWorker(_) => "in-worker",
+        }
+    }
 }
