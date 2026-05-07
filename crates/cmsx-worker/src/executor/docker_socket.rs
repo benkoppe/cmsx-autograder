@@ -29,6 +29,7 @@ use crate::{
 #[derive(Clone)]
 pub struct DockerSocketExecutor {
     docker: Docker,
+    config: DockerSocketExecutorConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,11 +59,14 @@ pub struct DockerJobConfig {
 }
 
 impl DockerSocketExecutor {
-    pub fn new(_config: &DockerSocketExecutorConfig) -> Result<Self> {
+    pub fn new(config: &DockerSocketExecutorConfig) -> Result<Self> {
         let docker = Docker::connect_with_local_defaults()
             .context("failed to connect to local Docker daemon")?;
 
-        Ok(Self { docker })
+        Ok(Self {
+            docker,
+            config: config.clone(),
+        })
     }
 
     pub async fn run(
@@ -71,7 +75,7 @@ impl DockerSocketExecutor {
         workspace: &JobWorkspace,
         cancel: CancellationToken,
     ) -> Result<ExecutionOutput> {
-        let config = parse_docker_job_config(job)?;
+        let config = parse_docker_job_config(job, &self.config)?;
         let started = Instant::now();
         let container_name = container_name(job);
 
@@ -202,17 +206,12 @@ impl DockerSocketExecutor {
     }
 }
 
-pub fn parse_docker_job_config(job: &ClaimedJob) -> Result<DockerJobConfig> {
+pub fn parse_docker_job_config(
+    job: &ClaimedJob,
+    defaults: &DockerSocketExecutorConfig,
+) -> Result<DockerJobConfig> {
     let runner = serde_json::from_value::<RunnerConfig>(job.runner_config.clone())
         .context("invalid runner_config for docker-socket executor")?;
-
-    let image = runner
-        .image
-        .map(|image| image.trim().to_string())
-        .filter(|image| !image.is_empty())
-        .ok_or_else(|| {
-            anyhow::anyhow!("runner_config.image is required for docker-socket executor")
-        })?;
 
     let execution = serde_json::from_value::<ExecutionConfig>(job.execution_config.clone())
         .unwrap_or(ExecutionConfig {
@@ -224,14 +223,35 @@ pub fn parse_docker_job_config(job: &ClaimedJob) -> Result<DockerJobConfig> {
             read_only_root: None,
         });
 
+    let image = runner
+        .image
+        .map(|image| image.trim().to_string())
+        .filter(|image| !image.is_empty())
+        .unwrap_or_else(|| defaults.default_image.trim().to_string());
+
+    if image.is_empty() {
+        bail!("executor.default_image must not be empty");
+    }
+
     Ok(DockerJobConfig {
         image,
-        timeout_seconds: normalize_timeout_seconds(execution.timeout_seconds),
-        memory_bytes: normalize_memory_bytes(execution.memory_mb)?,
-        nano_cpus: normalize_nano_cpus(execution.cpus)?,
-        pids_limit: normalize_pids_limit(execution.pids_limit)?,
-        network_enabled: execution.network.unwrap_or(false),
-        read_only_root: execution.read_only_root.unwrap_or(false),
+        timeout_seconds: execution
+            .timeout_seconds
+            .or(defaults.default_timeout_seconds)
+            .map(Option::Some)
+            .map(normalize_timeout_seconds)
+            .unwrap_or_else(|| normalize_timeout_seconds(None)),
+        memory_bytes: normalize_memory_bytes(execution.memory_mb.or(defaults.default_memory_mb))?,
+        nano_cpus: normalize_nano_cpus(execution.cpus.or(defaults.default_cpus))?,
+        pids_limit: normalize_pids_limit(execution.pids_limit.or(defaults.default_pids_limit))?,
+        network_enabled: execution
+            .network
+            .or(defaults.default_network)
+            .unwrap_or(false),
+        read_only_root: execution
+            .read_only_root
+            .or(defaults.default_read_only_root)
+            .unwrap_or(false),
     })
 }
 
@@ -425,20 +445,36 @@ mod tests {
         }
     }
 
+    fn default_executor_config() -> DockerSocketExecutorConfig {
+        DockerSocketExecutorConfig {
+            workspace_root: "data/worker".into(),
+            grader_root: "examples/assignments".into(),
+            max_jobs: Some(1),
+            keep_workspaces: false,
+            default_image: "cmsx-runner-python:latest".to_string(),
+            default_timeout_seconds: Some(60),
+            default_memory_mb: Some(512),
+            default_cpus: Some(1.0),
+            default_pids_limit: Some(128),
+            default_network: Some(false),
+            default_read_only_root: Some(false),
+        }
+    }
+
     #[test]
     fn docker_job_config_requires_image() {
         let job = test_job(json!({}), json!({}));
 
-        let error = parse_docker_job_config(&job).unwrap_err();
+        let config = parse_docker_job_config(&job, &default_executor_config()).unwrap();
 
-        assert!(error.to_string().contains("runner_config.image"));
+        assert_eq!(config.image, "cmsx-runner-python:latest");
     }
 
     #[test]
     fn docker_job_config_parses_defaults() {
         let job = test_job(json!({}), json!({ "image": "runner:latest" }));
 
-        let config = parse_docker_job_config(&job).unwrap();
+        let config = parse_docker_job_config(&job, &default_executor_config()).unwrap();
 
         assert_eq!(config.image, "runner:latest");
         assert_eq!(config.timeout_seconds, DEFAULT_TIMEOUT_SECONDS);
@@ -447,6 +483,62 @@ mod tests {
         assert_eq!(config.pids_limit, None);
         assert!(!config.network_enabled);
         assert!(!config.read_only_root);
+    }
+
+    #[test]
+    fn docker_job_config_allows_image_override() {
+        let job = test_job(json!({}), json!({ "image": "custom-runner:latest" }));
+
+        let config = parse_docker_job_config(&job, &default_executor_config()).unwrap();
+
+        assert_eq!(config.image, "custom-runner:latest");
+    }
+
+    #[test]
+    fn docker_job_config_empty_image_uses_default() {
+        let job = test_job(json!({}), json!({ "image": "   " }));
+
+        let config = parse_docker_job_config(&job, &default_executor_config()).unwrap();
+
+        assert_eq!(config.image, "cmsx-runner-python:latest");
+    }
+
+    #[test]
+    fn docker_job_config_uses_worker_defaults() {
+        let job = test_job(json!({}), json!({}));
+
+        let config = parse_docker_job_config(&job, &default_executor_config()).unwrap();
+
+        assert_eq!(config.timeout_seconds, 60);
+        assert_eq!(config.memory_bytes, Some(512 * 1024 * 1024));
+        assert_eq!(config.nano_cpus, Some(1_000_000_000));
+        assert_eq!(config.pids_limit, Some(128));
+        assert!(!config.network_enabled);
+        assert!(!config.read_only_root);
+    }
+
+    #[test]
+    fn docker_job_config_assignment_overrides_worker_defaults() {
+        let job = test_job(
+            json!({
+                "timeout_seconds": 30,
+                "memory_mb": 256,
+                "cpus": 1.5,
+                "pids_limit": 64,
+                "network": true,
+                "read_only_root": true
+            }),
+            json!({}),
+        );
+
+        let config = parse_docker_job_config(&job, &default_executor_config()).unwrap();
+
+        assert_eq!(config.timeout_seconds, 30);
+        assert_eq!(config.memory_bytes, Some(256 * 1024 * 1024));
+        assert_eq!(config.nano_cpus, Some(1_500_000_000));
+        assert_eq!(config.pids_limit, Some(64));
+        assert!(config.network_enabled);
+        assert!(config.read_only_root);
     }
 
     #[test]
@@ -463,7 +555,7 @@ mod tests {
             json!({ "image": "runner:latest" }),
         );
 
-        let config = parse_docker_job_config(&job).unwrap();
+        let config = parse_docker_job_config(&job, &default_executor_config()).unwrap();
 
         assert_eq!(config.timeout_seconds, 30);
         assert_eq!(config.memory_bytes, Some(512 * 1024 * 1024));
