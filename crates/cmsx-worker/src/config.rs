@@ -36,7 +36,6 @@ pub struct DockerSocketExecutorConfig {
     pub default_cpus: Option<f64>,
     pub default_pids_limit: Option<i64>,
     pub default_network: Option<bool>,
-    pub default_read_only_root: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

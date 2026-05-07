@@ -466,7 +466,6 @@ default_memory_mb = 512
 default_cpus = 1
 default_pids_limit = 128
 default_network = false
-default_read_only_root = false
 ```
 
 ## Capability Model

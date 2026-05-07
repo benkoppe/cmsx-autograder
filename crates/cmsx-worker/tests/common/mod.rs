@@ -8,7 +8,7 @@ use tempfile::{Builder, TempDir};
 use uuid::Uuid;
 
 use cmsx_core::{ClaimedJob, GradingResult};
-use cmsx_worker::workspace::JobWorkspace;
+use cmsx_worker::workspace::{JobWorkspace, set_runtime_workspace_permissions};
 
 pub struct ExecutorFixture {
     _temp: TempDir,
@@ -46,6 +46,9 @@ impl ExecutorFixture {
         fs::create_dir_all(&workspace.grader_dir).expect("failed to create grader dir");
         fs::create_dir_all(&workspace.work_dir).expect("failed to create work dir");
         fs::create_dir_all(&workspace.artifacts_dir).expect("failed to create artifacts dir");
+
+        set_runtime_workspace_permissions(&workspace)
+            .expect("failed to set runtime workspace permissions");
 
         Self {
             _temp: temp,

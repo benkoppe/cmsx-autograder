@@ -45,7 +45,6 @@ fn docker_config(fixture: &ExecutorFixture) -> DockerSocketExecutorConfig {
         default_cpus: Some(1.0),
         default_pids_limit: Some(128),
         default_network: Some(false),
-        default_read_only_root: Some(false),
     }
 }
 
@@ -270,4 +269,145 @@ async fn container_is_removed_after_completion() {
         inspect.is_err(),
         "container {name} should have been removed after execution"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon and cmsx-runner-python:latest image"]
+async fn read_only_root_blocks_root_writes_but_tmp_and_workspace_are_writable() {
+    let fixture = ExecutorFixture::new("docker-socket-");
+    require_runner_image(&docker_config(&fixture).default_image).await;
+
+    fixture.write_metadata(json!({}));
+    fixture.write_grade_py(indoc! {r#"
+        from pathlib import Path
+        from cmsx_autograder import Result
+        def main(submission):
+            result = Result(max_score=5)
+            try:
+                Path("/should-not-write").write_text("nope")
+                root_write_blocked = False
+            except Exception:
+                root_write_blocked = True
+            tmp_writable = False
+            work_writable = False
+            output_writable = False
+            try:
+                Path("/tmp/can-write").write_text("ok")
+                tmp_writable = Path("/tmp/can-write").read_text() == "ok"
+            except Exception:
+                tmp_writable = False
+            try:
+                Path("/work/can-write").write_text("ok")
+                work_writable = Path("/work/can-write").read_text() == "ok"
+            except Exception:
+                work_writable = False
+            try:
+                Path("/output/can-write").write_text("ok")
+                output_writable = Path("/output/can-write").read_text() == "ok"
+            except Exception:
+                output_writable = False
+            result.check("root write blocked", root_write_blocked, points=1)
+            result.check("tmp writable", tmp_writable, points=1)
+            result.check("work writable", work_writable, points=1)
+            result.check("output writable", output_writable, points=1)
+            result.check("home is tmp", Path.home().resolve() == Path("/tmp").resolve(), points=1)
+            return result
+    "#});
+
+    let output = executor(&fixture)
+        .run(
+            &fixture.job(json!({})),
+            &fixture.workspace,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("executor failed");
+
+    assert!(matches!(
+        output.status,
+        ExecutionStatus::Exited { code: Some(0) }
+    ));
+
+    let result = fixture.read_result().await;
+
+    assert!(matches!(result.status, ResultStatus::Passed));
+    assert_eq!(result.score, 5.0);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon and cmsx-runner-python:latest image"]
+async fn runner_uses_fixed_non_root_user() {
+    let fixture = ExecutorFixture::new("docker-socket-");
+    require_runner_image(&docker_config(&fixture).default_image).await;
+
+    fixture.write_metadata(json!({}));
+    fixture.write_grade_py(indoc! {r#"
+        import os
+        from cmsx_autograder import Result
+        def main(submission):
+            result = Result(max_score=2)
+            result.check("uid", os.getuid() == 10001, points=1)
+            result.check("gid", os.getgid() == 10001, points=1)
+            return result
+    "#});
+
+    let output = executor(&fixture)
+        .run(
+            &fixture.job(json!({})),
+            &fixture.workspace,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("executor failed");
+
+    assert!(matches!(
+        output.status,
+        ExecutionStatus::Exited { code: Some(0) }
+    ));
+
+    let result = fixture.read_result().await;
+
+    assert!(matches!(result.status, ResultStatus::Passed));
+    assert_eq!(result.score, 2.0);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon and cmsx-runner-python:latest image"]
+async fn network_is_disabled_by_default() {
+    let fixture = ExecutorFixture::new("docker-socket-");
+    require_runner_image(&docker_config(&fixture).default_image).await;
+
+    fixture.write_metadata(json!({}));
+    fixture.write_grade_py(indoc! {r#"
+        import socket
+        from cmsx_autograder import Result
+        def main(submission):
+            result = Result(max_score=1)
+            try:
+                socket.create_connection(("example.com", 80), timeout=2)
+                network_blocked = False
+            except Exception:
+                network_blocked = True
+            result.check("network blocked", network_blocked, points=1)
+            return result
+    "#});
+
+    let output = executor(&fixture)
+        .run(
+            &fixture.job(json!({})),
+            &fixture.workspace,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("executor failed");
+
+    assert!(matches!(
+        output.status,
+        ExecutionStatus::Exited { code: Some(0) }
+    ));
+
+    let result = fixture.read_result().await;
+
+    assert!(matches!(result.status, ResultStatus::Passed));
+    assert_eq!(result.score, 1.0);
 }

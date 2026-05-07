@@ -51,6 +51,13 @@
         doCheck = false;
       };
 
+      runnerPasswd = imagePkgs.writeTextDir "etc/passwd" ''
+        cmsx-runner:x:10001:10001:CMSX Runner:/tmp:/bin/sh
+      '';
+      runnerGroup = imagePkgs.writeTextDir "etc/group" ''
+        cmsx-runner:x:10001:
+      '';
+
       mkRunnerPython =
         extraPythonPackages:
         python.withPackages (
@@ -87,6 +94,9 @@
             imagePkgs.cacert
             imagePkgs.dockerTools.binSh
             imagePkgs.dockerTools.usrBinEnv
+
+            runnerPasswd
+            runnerGroup
           ]
           ++ extraContents;
 

@@ -1,4 +1,4 @@
-use std::{path::Path, time::Instant};
+use std::{collections::HashMap, path::Path, time::Instant};
 
 use anyhow::{Context, Result, bail};
 use bollard::{
@@ -16,6 +16,9 @@ use tokio::{task::JoinHandle, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 use cmsx_core::ClaimedJob;
+
+const RUNNER_USER: &str = "10001:10001";
+const RUNNER_HOME: &str = "/tmp";
 
 use crate::{
     config::DockerSocketExecutorConfig,
@@ -39,7 +42,6 @@ struct ExecutionConfig {
     cpus: Option<f64>,
     pids_limit: Option<i64>,
     network: Option<bool>,
-    read_only_root: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,7 +57,6 @@ pub struct DockerJobConfig {
     pub nano_cpus: Option<i64>,
     pub pids_limit: Option<i64>,
     pub network_enabled: bool,
-    pub read_only_root: bool,
 }
 
 impl DockerSocketExecutor {
@@ -126,6 +127,7 @@ impl DockerSocketExecutor {
                 bind_mount(&work_dir, "/work", false),
                 bind_mount(&output_dir, "/output", false),
             ]),
+            tmpfs: Some(default_tmpfs_mounts()),
             network_mode: Some(if config.network_enabled {
                 "bridge".to_string()
             } else {
@@ -135,9 +137,9 @@ impl DockerSocketExecutor {
             memory_swap: config.memory_bytes,
             nano_cpus: config.nano_cpus,
             pids_limit: config.pids_limit,
-            readonly_rootfs: Some(config.read_only_root),
+            readonly_rootfs: Some(true),
             cap_drop: Some(vec!["ALL".to_string()]),
-            security_opt: Some(vec!["no-new-privileges".to_string()]),
+            security_opt: Some(vec!["no-new-privileges:true".to_string()]),
             privileged: Some(false),
             publish_all_ports: Some(false),
             auto_remove: Some(false),
@@ -147,6 +149,7 @@ impl DockerSocketExecutor {
 
         let body = ContainerCreateBody {
             image: Some(config.image.clone()),
+            user: Some(RUNNER_USER.to_string()),
             cmd: Some(vec![
                 "python".to_string(),
                 "-m".to_string(),
@@ -155,6 +158,7 @@ impl DockerSocketExecutor {
             ]),
             working_dir: Some("/work".to_string()),
             env: Some(vec![
+                format!("HOME={RUNNER_HOME}"),
                 "CMSX_INPUT_DIR=/input".to_string(),
                 "CMSX_WORK_DIR=/work".to_string(),
                 "CMSX_OUTPUT_DIR=/output".to_string(),
@@ -219,7 +223,6 @@ pub fn parse_docker_job_config(
             cpus: None,
             pids_limit: None,
             network: None,
-            read_only_root: None,
         });
 
     let image = runner
@@ -246,10 +249,6 @@ pub fn parse_docker_job_config(
         network_enabled: execution
             .network
             .or(defaults.default_network)
-            .unwrap_or(false),
-        read_only_root: execution
-            .read_only_root
-            .or(defaults.default_read_only_root)
             .unwrap_or(false),
     })
 }
@@ -322,6 +321,19 @@ fn bind_mount(source: &str, target: &str, read_only: bool) -> Mount {
         read_only: Some(read_only),
         ..Default::default()
     }
+}
+
+fn default_tmpfs_mounts() -> HashMap<String, String> {
+    HashMap::from([
+        (
+            "/tmp".to_string(),
+            "rw,noexec,nosuid,nodev,size=64m,mode=1777".to_string(),
+        ),
+        (
+            "/run".to_string(),
+            "rw,noexec,nosuid,nodev,size=16m,mode=755".to_string(),
+        ),
+    ])
 }
 
 async fn wait_for_container(docker: &Docker, container_id: &str) -> Result<ExecutionStatus> {
@@ -465,7 +477,6 @@ mod tests {
             default_cpus: Some(1.0),
             default_pids_limit: Some(128),
             default_network: Some(false),
-            default_read_only_root: Some(false),
         }
     }
 
@@ -507,7 +518,6 @@ mod tests {
         assert_eq!(config.nano_cpus, Some(1_000_000_000));
         assert_eq!(config.pids_limit, Some(128));
         assert!(!config.network_enabled);
-        assert!(!config.read_only_root);
     }
 
     #[test]
@@ -519,7 +529,6 @@ mod tests {
                 "cpus": 1.5,
                 "pids_limit": 64,
                 "network": true,
-                "read_only_root": true
             }),
             json!({}),
         );
@@ -531,7 +540,6 @@ mod tests {
         assert_eq!(config.nano_cpus, Some(1_500_000_000));
         assert_eq!(config.pids_limit, Some(64));
         assert!(config.network_enabled);
-        assert!(config.read_only_root);
     }
 
     #[test]
@@ -543,7 +551,6 @@ mod tests {
                 "cpus": 1.5,
                 "pids_limit": 128,
                 "network": true,
-                "read_only_root": true
             }),
             json!({ "image": "runner:latest" }),
         );
@@ -555,7 +562,6 @@ mod tests {
         assert_eq!(config.nano_cpus, Some(1_500_000_000));
         assert_eq!(config.pids_limit, Some(128));
         assert!(config.network_enabled);
-        assert!(config.read_only_root);
     }
 
     #[test]
