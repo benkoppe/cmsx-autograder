@@ -85,9 +85,9 @@ pub async fn run(config: WorkerConfig) -> Result<()> {
 
 fn executor_from_config(config: &ExecutorConfig) -> Result<Executor> {
     match config {
-        ExecutorConfig::DockerSocket(config) => {
-            Ok(Executor::DockerSocket(DockerSocketExecutor::new(config)?))
-        }
+        ExecutorConfig::DockerSocket(config) => Ok(Executor::DockerSocket(Box::new(
+            DockerSocketExecutor::new(config)?,
+        ))),
         ExecutorConfig::InWorker(config) => Ok(Executor::InWorker(InWorkerExecutor::new(config))),
     }
 }

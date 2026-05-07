@@ -14,7 +14,7 @@ pub use in_worker::InWorkerExecutor;
 
 #[derive(Clone)]
 pub enum Executor {
-    DockerSocket(DockerSocketExecutor),
+    DockerSocket(Box<DockerSocketExecutor>),
     InWorker(InWorkerExecutor),
 }
 
