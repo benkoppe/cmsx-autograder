@@ -257,8 +257,7 @@ async fn container_is_removed_after_completion() {
         ExecutionStatus::Exited { code: Some(0) }
     ));
 
-    let docker =
-        Docker::connect_with_local_defaults().expect("failed to connect to local Docker daemon");
+    let docker = connect_test_docker();
 
     let inspect = docker
         .inspect_container(
