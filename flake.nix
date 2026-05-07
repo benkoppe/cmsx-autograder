@@ -32,6 +32,7 @@
         ./flake-parts/devshell.nix
         ./flake-parts/git-hooks.nix
         ./flake-parts/services.nix
+        ./flake-parts/docker-images.nix
       ];
     };
 }
