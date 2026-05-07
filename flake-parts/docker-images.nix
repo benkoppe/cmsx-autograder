@@ -1,9 +1,27 @@
-{ lib, ... }:
+{ lib, inputs, ... }:
 {
   perSystem =
-    { pkgs, ... }:
+    {
+      pkgs,
+      system,
+      inputs',
+      ...
+    }:
     let
-      python = pkgs.python314;
+      targetSystem =
+        {
+          x86_64-darwin = "x86_64-linux";
+          aarch64-darwin = "aarch64-linux";
+        }
+        .${system} or system;
+
+      imagePkgs = import inputs.nixpkgs {
+        system = targetSystem;
+      };
+
+      inherit (inputs.nix2container.packages.${targetSystem}) nix2container;
+
+      python = imagePkgs.python314;
 
       sdkSrc = lib.fileset.toSource {
         root = ../python/sdk;
@@ -56,48 +74,92 @@
           contents = [
             runnerPython
 
-            pkgs.bashInteractive
-            pkgs.coreutils
-            pkgs.findutils
-            pkgs.gawk
-            pkgs.gnugrep
-            pkgs.gnused
-            pkgs.gnutar
-            pkgs.gzip
-            pkgs.which
+            imagePkgs.bashInteractive
+            imagePkgs.coreutils
+            imagePkgs.findutils
+            imagePkgs.gawk
+            imagePkgs.gnugrep
+            imagePkgs.gnused
+            imagePkgs.gnutar
+            imagePkgs.gzip
+            imagePkgs.which
 
-            pkgs.cacert
-            pkgs.dockerTools.binSh
-            pkgs.dockerTools.usrBinEnv
+            imagePkgs.cacert
+            imagePkgs.dockerTools.binSh
+            imagePkgs.dockerTools.usrBinEnv
           ]
           ++ extraContents;
 
-          path = lib.makeBinPath contents;
+          root = imagePkgs.buildEnv {
+            name = "${name}-root";
+            paths = contents;
+            pathsToLink = [
+              "/bin"
+              "/etc"
+              "/usr/bin"
+            ];
+          };
 
           baseConfig = {
-            Env = [
-              "PATH=${path}"
-              "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+            env = [
+              "PATH=/bin:/usr/bin"
+              "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
               "CMSX_INPUT_DIR=/input"
               "CMSX_WORK_DIR=/work"
               "CMSX_OUTPUT_DIR=/output"
             ]
             ++ extraEnv;
 
-            WorkingDir = "/work";
+            workingdir = "/work";
 
-            Cmd = [
+            cmd = [
               "python"
               "-m"
               "cmsx_autograder"
               "/grader/grade.py"
             ];
           };
-        in
-        pkgs.dockerTools.buildLayeredImage {
-          inherit name tag contents;
 
-          maxLayers = 120;
+          dependencyLayers = [
+            (nix2container.buildLayer {
+              deps = [ runnerPython ];
+              reproducible = false;
+            })
+
+            (nix2container.buildLayer {
+              deps = [
+                imagePkgs.bashInteractive
+                imagePkgs.coreutils
+              ];
+              reproducible = false;
+            })
+
+            (nix2container.buildLayer {
+              deps = [
+                imagePkgs.findutils
+                imagePkgs.gawk
+                imagePkgs.gnugrep
+                imagePkgs.gnused
+                imagePkgs.gnutar
+                imagePkgs.gzip
+                imagePkgs.which
+                imagePkgs.cacert
+              ];
+              reproducible = false;
+            })
+          ];
+
+          rootLayer = nix2container.buildLayer {
+            copyToRoot = root;
+            layers = dependencyLayers;
+            reproducible = false;
+          };
+        in
+        nix2container.buildImage {
+          inherit name tag;
+
+          layers = [ rootLayer ];
+          created = "1970-01-01T00:00:01Z";
 
           config = baseConfig // extraConfig;
         };
@@ -108,37 +170,40 @@
         name = "cmsx-runner-python";
         runnerPython = cmsx-runner-python;
       };
-
-      load-cmsx-runner-python = pkgs.writeShellApplication {
-        name = "load-cmsx-runner-python";
-        runtimeInputs = [
-          pkgs.docker
-        ];
-        text = ''
-          docker load < ${cmsx-runner-python-image}
-        '';
-      };
-
-      linuxPackages = lib.optionalAttrs pkgs.stdenv.isLinux {
+    in
+    {
+      packages = {
         inherit cmsx-autograder-python;
         inherit cmsx-runner-python;
         inherit cmsx-runner-python-image;
       };
 
-      linuxApps = lib.optionalAttrs pkgs.stdenv.isLinux {
+      apps = {
         load-cmsx-runner-python = {
           type = "app";
-          program = lib.getExe load-cmsx-runner-python;
+          program = lib.getExe (
+            pkgs.writeShellApplication {
+              name = "load-cmsx-runner-python";
+              runtimeInputs = [
+                inputs'.nix2container.packages.skopeo-nix2container
+                pkgs.docker-client
+              ];
+              text = ''
+                tmpdir=$(mktemp -d)
+                trap 'rm -rf "$tmpdir"' EXIT
+                image_ref="${cmsx-runner-python-image.imageName}:${cmsx-runner-python-image.imageTag}"
+                archive="$tmpdir/image.tar"
+                echo "Copy to Docker archive image $image_ref"
+                skopeo --insecure-policy copy \
+                  nix:${cmsx-runner-python-image} \
+                  docker-archive:"$archive":$image_ref \
+                  "$@"
+                echo "Load Docker image $image_ref"
+                docker load -i "$archive"
+              '';
+            }
+          );
         };
       };
-
-      linuxChecks = lib.optionalAttrs pkgs.stdenv.isLinux {
-        inherit cmsx-runner-python-image;
-      };
-    in
-    {
-      packages = linuxPackages;
-      apps = linuxApps;
-      checks = linuxChecks;
     };
 }
