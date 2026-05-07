@@ -1084,6 +1084,7 @@ mod tests {
             db: db.clone(),
             storage,
             cmsx,
+            admin: crate::config::AdminConfig::default(),
         };
 
         TestApp {

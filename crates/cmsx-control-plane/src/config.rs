@@ -17,6 +17,29 @@ pub struct Config {
     pub storage: StorageConfig,
     #[serde(default)]
     pub cmsx: CmsxConfig,
+    pub admin: AdminConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminConfig {
+    #[serde(default = "default_public_url")]
+    pub public_url: String,
+
+    #[serde(default)]
+    pub bootstrap_token_hashes: Vec<String>,
+}
+
+fn default_public_url() -> String {
+    "http://127.0.0.1:3000".to_string()
+}
+
+impl Default for AdminConfig {
+    fn default() -> Self {
+        Self {
+            public_url: default_public_url(),
+            bootstrap_token_hashes: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +95,7 @@ impl Default for Config {
                 prefix: String::new(),
             },
             cmsx: CmsxConfig::default(),
+            admin: AdminConfig::default(),
         }
     }
 }
@@ -96,8 +120,19 @@ impl Config {
             bail!("CMSX_DATABASE_URL must be set");
         }
 
+        self.admin.validate().context("invalid admin config")?;
         self.storage.validate().context("invalid storage config")?;
         self.cmsx.validate().context("invalid CMSX config")?;
+
+        Ok(())
+    }
+}
+
+impl AdminConfig {
+    fn validate(&self) -> Result<()> {
+        if self.public_url.trim().is_empty() {
+            bail!("admin.public_url must not be empty");
+        }
 
         Ok(())
     }

@@ -6,13 +6,18 @@ use axum::{
 use sqlx::PgPool;
 use tower_http::trace::TraceLayer;
 
-use crate::{config::CmsxConfig, routes, storage::Storage};
+use crate::{
+    config::{AdminConfig, CmsxConfig},
+    routes,
+    storage::Storage,
+};
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: PgPool,
     pub storage: Storage,
     pub cmsx: CmsxConfig,
+    pub admin: AdminConfig,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -50,6 +55,39 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/workers/jobs/{job_id}/files/{file_id}",
             get(routes::workers::get_job_file),
+        )
+        .route(
+            "/admin/assignments",
+            get(routes::admin::list_assignments).post(routes::admin::create_assignment),
+        )
+        .route(
+            "/admin/assignments/{slug}",
+            get(routes::admin::get_assignment).patch(routes::admin::update_assignment),
+        )
+        .route(
+            "/admin/assignments/{slug}/tokens",
+            get(routes::admin::list_assignment_tokens).post(routes::admin::create_assignment_token),
+        )
+        .route(
+            "/admin/assignments/{slug}/tokens/{token_id}/revoke",
+            post(routes::admin::revoke_assignment_token),
+        )
+        .route(
+            "/admin/workers",
+            get(routes::admin::list_workers).post(routes::admin::create_worker),
+        )
+        .route("/admin/workers/{worker_id}", get(routes::admin::get_worker))
+        .route(
+            "/admin/workers/{worker_id}/keys",
+            get(routes::admin::list_worker_keys).post(routes::admin::create_worker_key),
+        )
+        .route(
+            "/admin/workers/{worker_id}/keys/{key_id}/revoke",
+            post(routes::admin::revoke_worker_key),
+        )
+        .route(
+            "/admin/workers/{worker_id}/disable",
+            post(routes::admin::disable_worker),
         )
         .with_state(state)
         .layer(TraceLayer::new_for_http())
