@@ -5,4 +5,3 @@ async fn main() -> anyhow::Result<()> {
     let config = cmsx_worker::config::WorkerConfig::load()?;
     cmsx_worker::worker::run(config).await
 }
-
