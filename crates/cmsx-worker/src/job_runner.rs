@@ -44,6 +44,7 @@ struct JobLifecycle {
     cancel: CancellationToken,
     reason: Arc<RwLock<CancellationReason>>,
     events_enabled: bool,
+    terminal_posted_or_lost: bool,
     events: JobEventSequencer,
 }
 
@@ -77,8 +78,13 @@ pub async fn run_job(
         cancel,
         reason,
         events_enabled: true,
+        terminal_posted_or_lost: false,
         events: JobEventSequencer::new(),
     };
+
+    if lifecycle.handle_pre_start_cancellation().await {
+        return Ok(());
+    }
 
     let workspace_result =
         prepare_attempt_workspace(config.executor.workspace_root(), &lifecycle.job).await;
@@ -518,7 +524,7 @@ impl JobLifecycle {
         duration_ms: Option<i64>,
         output: &ExecutionOutput,
     ) {
-        if self.current_reason().await == CancellationReason::LeaseLost {
+        if !should_post_terminal_for_reason(self.current_reason().await) {
             tracing::info!(
                 job_id = %self.job.id,
                 "skipping result post after lease loss"
@@ -535,12 +541,11 @@ impl JobLifecycle {
 
         match self.client.post_result(self.job.id, &request).await {
             Ok(()) => {
-                self.events_enabled = false;
+                self.stop_network_lifecycle_after_terminal();
             }
             Err(error) if error.is_status(StatusCode::BAD_REQUEST) => {
                 let message = rejected_result_message(&error);
-                self.post_failed(FAILURE_RESULT_INVALID, message, false)
-                    .await;
+                self.post_failed_after_rejected_result(message).await;
             }
             Err(error) if error.is_status(StatusCode::NOT_FOUND) => {
                 tracing::info!(
@@ -548,7 +553,7 @@ impl JobLifecycle {
                     ?error,
                     "post_result returned 404; ownership lost"
                 );
-                self.events_enabled = false;
+                self.stop_network_lifecycle_after_terminal();
             }
             Err(error) => {
                 tracing::warn!(
@@ -560,8 +565,37 @@ impl JobLifecycle {
         }
     }
 
+    async fn post_failed_after_rejected_result(&mut self, message: String) {
+        let request = JobFailureRequest {
+            reason: FAILURE_RESULT_INVALID.to_string(),
+            message: cap_failure_message(&message),
+            retryable: false,
+        };
+
+        match self.client.post_failed(self.job.id, &request).await {
+            Ok(()) => {
+                self.stop_network_lifecycle_after_terminal();
+            }
+            Err(error) if error.is_status(StatusCode::NOT_FOUND) => {
+                tracing::info!(
+                    job_id = %self.job.id,
+                    ?error,
+                    "post_failed result_invalid after rejected result returned 404; ownership lost"
+                );
+                self.stop_network_lifecycle_after_terminal();
+            }
+            Err(error) => {
+                tracing::warn!(
+                    job_id = %self.job.id,
+                    ?error,
+                    "post_failed result_invalid after rejected result failed"
+                );
+            }
+        }
+    }
+
     async fn post_failed(&mut self, reason: &str, message: String, retryable: bool) {
-        if self.current_reason().await == CancellationReason::LeaseLost
+        if !should_post_terminal_for_reason(self.current_reason().await)
             && reason != FAILURE_LEASE_LOST
         {
             tracing::info!(
@@ -580,7 +614,7 @@ impl JobLifecycle {
 
         match self.client.post_failed(self.job.id, &request).await {
             Ok(()) => {
-                self.events_enabled = false;
+                self.stop_network_lifecycle_after_terminal();
             }
             Err(error) if error.is_status(StatusCode::NOT_FOUND) => {
                 tracing::info!(
@@ -588,7 +622,7 @@ impl JobLifecycle {
                     ?error,
                     "post_failed returned 404; ownership lost"
                 );
-                self.events_enabled = false;
+                self.stop_network_lifecycle_after_terminal();
             }
             Err(error) => {
                 tracing::warn!(
@@ -608,7 +642,7 @@ impl JobLifecycle {
         message: &str,
         data: serde_json::Value,
     ) {
-        if !self.events_enabled {
+        if self.terminal_posted_or_lost || !self.events_enabled {
             return;
         }
 
@@ -653,22 +687,24 @@ impl JobLifecycle {
 
     async fn post_output_events(&mut self, output: &ExecutionOutput) {
         if let Some(stdout) = &output.stdout_summary {
+            let message = cap_failure_message(stdout);
             self.post_event(
                 "stdout",
                 "stdout",
                 "staff",
-                stdout,
+                &message,
                 json!({ "summary": true }),
             )
             .await;
         }
 
         if let Some(stderr) = &output.stderr_summary {
+            let message = cap_failure_message(stderr);
             self.post_event(
                 "stderr",
                 "stderr",
                 "staff",
-                stderr,
+                &message,
                 json!({ "summary": true }),
             )
             .await;
@@ -682,6 +718,11 @@ impl JobLifecycle {
     async fn mark_cancellation(&self, next: CancellationReason) {
         let mut current = self.reason.write().await;
         apply_cancellation_reason(&mut current, next);
+    }
+
+    fn stop_network_lifecycle_after_terminal(&mut self) {
+        self.events_enabled = false;
+        self.terminal_posted_or_lost = true;
     }
 }
 
@@ -879,6 +920,14 @@ pub fn classify_execution_status(status: &ExecutionStatus) -> FailureClassificat
     }
 }
 
+pub fn should_read_result_after_execution(status: &ExecutionStatus) -> bool {
+    matches!(status, ExecutionStatus::Exited { .. })
+}
+
+pub fn should_post_terminal_for_reason(reason: CancellationReason) -> bool {
+    !matches!(reason, CancellationReason::LeaseLost)
+}
+
 fn explicit_cancelled_result() -> GradingResult {
     GradingResult {
         schema_version: "1".to_string(),
@@ -1045,5 +1094,57 @@ mod tests {
 
         assert_eq!(classification.reason, FAILURE_EXECUTOR_ERROR);
         assert!(!classification.retryable);
+    }
+
+    #[test]
+    fn exited_execution_should_read_result() {
+        assert!(should_read_result_after_execution(
+            &ExecutionStatus::Exited { code: Some(0) }
+        ));
+        assert!(should_read_result_after_execution(
+            &ExecutionStatus::Exited { code: None }
+        ));
+    }
+
+    #[test]
+    fn timeout_and_cancelled_should_not_read_result_by_default() {
+        assert!(!should_read_result_after_execution(
+            &ExecutionStatus::TimedOut
+        ));
+        assert!(!should_read_result_after_execution(
+            &ExecutionStatus::Cancelled
+        ));
+    }
+
+    #[test]
+    fn terminal_posts_are_not_allowed_after_lease_loss() {
+        assert!(should_post_terminal_for_reason(CancellationReason::None));
+        assert!(should_post_terminal_for_reason(
+            CancellationReason::ControlPlaneCancelled
+        ));
+        assert!(!should_post_terminal_for_reason(
+            CancellationReason::LeaseLost
+        ));
+    }
+
+    #[test]
+    fn cap_failure_message_preserves_char_boundary() {
+        let value = "é".repeat(FAILURE_MESSAGE_MAX_BYTES);
+        let capped = cap_failure_message(&value);
+
+        assert!(capped.len() <= FAILURE_MESSAGE_MAX_BYTES);
+        assert!(capped.is_char_boundary(capped.len()));
+    }
+
+    #[test]
+    fn rejected_result_message_handles_empty_body() {
+        let error = ClientError::Status {
+            status: StatusCode::BAD_REQUEST,
+            body: String::new(),
+        };
+
+        let message = rejected_result_message(&error);
+
+        assert_eq!(message, "control plane rejected result: ");
     }
 }
