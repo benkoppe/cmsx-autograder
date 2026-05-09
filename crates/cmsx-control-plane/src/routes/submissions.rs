@@ -261,6 +261,8 @@ mod tests {
     use axum::http::StatusCode;
     use uuid::Uuid;
 
+    use cmsx_core::{JobStatus, ResultStatus};
+
     use crate::test_support;
 
     #[tokio::test]
@@ -308,7 +310,10 @@ mod tests {
         assert_eq!(submissions[0]["netids_raw"], "abc123,def456");
         assert_eq!(submissions[0]["file_count"], 1);
         assert_eq!(submissions[0]["latest_job"]["id"], setup.job_id.to_string());
-        assert_eq!(submissions[0]["latest_job"]["status"], "queued");
+        assert_eq!(
+            submissions[0]["latest_job"]["status"],
+            JobStatus::Queued.as_str()
+        );
     }
 
     #[tokio::test]
@@ -328,7 +333,10 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body[0]["latest_job"]["id"], setup.job_id.to_string());
-        assert_eq!(body[0]["latest_job"]["status"], "succeeded");
+        assert_eq!(
+            body[0]["latest_job"]["status"],
+            JobStatus::Succeeded.as_str()
+        );
         assert!(!body[0]["latest_job"]["started_at"].is_null());
         assert!(!body[0]["latest_job"]["finished_at"].is_null());
     }
@@ -394,8 +402,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["job_id"], setup.job_id.to_string());
-        assert_eq!(results[0]["job_status"], "succeeded");
-        assert_eq!(results[0]["result_status"], "passed");
+        assert_eq!(results[0]["job_status"], JobStatus::Succeeded.as_str());
+        assert_eq!(results[0]["result_status"], ResultStatus::Passed.as_str());
         assert_eq!(results[0]["score"], 100.0);
         assert_eq!(results[0]["stdout_summary"], "stdout");
         assert_eq!(results[0]["tests"][0]["name"], "smoke");

@@ -6,6 +6,8 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use cmsx_core::WorkerStatus;
+
 pub struct ProvisionedWorker {
     pub worker_id: Uuid,
     pub key_id: Uuid,
@@ -27,6 +29,7 @@ pub async fn provision_worker(db: &PgPool, name: &str) -> Result<ProvisionedWork
     let public_key_fingerprint = public_key_fingerprint(&public_key_pem);
 
     let mut tx = db.begin().await.context("failed to begin transaction")?;
+    let offline = WorkerStatus::Offline.as_str();
 
     sqlx::query!(
         r#"
@@ -38,10 +41,11 @@ pub async fn provision_worker(db: &PgPool, name: &str) -> Result<ProvisionedWork
             created_at,
             last_seen_at
         )
-        VALUES ($1, $2, 'offline', NULL, $3, NULL)
+        VALUES ($1, $2, $3, NULL, $4, NULL)
         "#,
         worker_id,
         name,
+        offline,
         now
     )
     .execute(&mut *tx)

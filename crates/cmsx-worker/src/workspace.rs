@@ -1024,7 +1024,7 @@ mod tests {
         let result_path = temp.path().join("result.json");
         let result = json!({
             "schema_version": GRADING_RESULT_SCHEMA_VERSION,
-            "status": "passed",
+            "status": ResultStatus::Passed.as_str(),
             "score": 1.0,
             "max_score": 1.0,
             "feedback": null,

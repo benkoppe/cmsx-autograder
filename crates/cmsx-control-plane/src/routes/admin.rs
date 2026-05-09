@@ -16,6 +16,8 @@ use serde_json::{Value, json};
 use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
+use cmsx_core::WorkerStatus;
+
 use crate::{app::AppState, db, error::ApiError, workers};
 
 pub fn router() -> Router<AppState> {
@@ -699,14 +701,17 @@ pub async fn disable_worker(
     _admin: AdminAuth,
     Path(worker_id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
+    let disabled = WorkerStatus::Disabled.as_str();
+
     let update = sqlx::query!(
         r#"
         UPDATE workers
-        SET status = 'disabled'
+        SET status = $2
         WHERE id = $1
-          AND status != 'disabled'
+          AND status != $2
         "#,
         worker_id,
+        disabled,
     )
     .execute(&state.db)
     .await
@@ -914,7 +919,10 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use cmsx_core::{ClaimJobRequest, JobEventBatchRequest, WorkerHeartbeatRequest, WorkerStatus};
+    use cmsx_core::{
+        ClaimJobRequest, JobEventBatchRequest, JobStatus, ResultStatus, WorkerHeartbeatRequest,
+        WorkerStatus,
+    };
 
     use crate::test_support;
 
@@ -1114,7 +1122,7 @@ mod tests {
         .expect("failed to load worker");
 
         assert_eq!(worker.name, "worker-1");
-        assert_eq!(worker.status, "offline");
+        assert_eq!(worker.status, WorkerStatus::Offline.as_str());
 
         let key = sqlx::query!(
             r#"
@@ -1327,8 +1335,8 @@ mod tests {
         .await
         .expect("failed to load stored result");
 
-        assert_eq!(stored.job_status, "succeeded");
-        assert_eq!(stored.result_status, "passed");
+        assert_eq!(stored.job_status, JobStatus::Succeeded.as_str());
+        assert_eq!(stored.result_status, ResultStatus::Passed.as_str());
         assert_eq!(stored.score, 100.0);
         assert_eq!(stored.max_score, 100.0);
 

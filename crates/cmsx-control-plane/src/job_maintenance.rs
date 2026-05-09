@@ -3,7 +3,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use tokio::time::{Duration, MissedTickBehavior};
 use uuid::Uuid;
 
-use cmsx_core::GradingResult;
+use cmsx_core::{GradingResult, JobStatus};
 
 use crate::error::ApiError;
 
@@ -51,19 +51,26 @@ async fn terminalize_expired_cancelled_jobs(
     tx: &mut Transaction<'_, Postgres>,
     now: DateTime<Utc>,
 ) -> Result<(), ApiError> {
+    let cancelled = JobStatus::Cancelled.as_str();
+    let claimed = JobStatus::Claimed.as_str();
+    let running = JobStatus::Running.as_str();
+
     let rows = sqlx::query!(
         r#"
         UPDATE grading_jobs
-        SET status = 'cancelled',
+        SET status = $2,
             finished_at = $1,
             lease_expires_at = NULL
-        WHERE status IN ('claimed', 'running')
+        WHERE status IN ($3, $4)
           AND cancel_requested_at IS NOT NULL
           AND cancel_expires_at IS NOT NULL
           AND cancel_expires_at <= $1
         RETURNING id
         "#,
-        now
+        now,
+        cancelled,
+        claimed,
+        running
     )
     .fetch_all(&mut **tx)
     .await
@@ -86,21 +93,28 @@ async fn mark_exhausted_expired_jobs(
     tx: &mut Transaction<'_, Postgres>,
     now: DateTime<Utc>,
 ) -> Result<(), ApiError> {
+    let error = JobStatus::Error.as_str();
+    let claimed = JobStatus::Claimed.as_str();
+    let running = JobStatus::Running.as_str();
+
     let result = sqlx::query!(
         r#"
         UPDATE grading_jobs
-        SET status = 'error',
+        SET status = $2,
             finished_at = $1,
             lease_expires_at = NULL,
             failure_reason = 'lease_expired',
             failure_message = 'job lease expired and max attempts were exhausted',
             failure_retryable = false
-        WHERE status IN ('claimed', 'running')
+        WHERE status IN ($3, $4)
           AND lease_expires_at <= $1
           AND cancel_requested_at IS NULL
           AND attempts >= max_attempts
         "#,
-        now
+        now,
+        error,
+        claimed,
+        running
     )
     .execute(&mut **tx)
     .await

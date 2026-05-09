@@ -274,10 +274,12 @@ pub async fn cancel_job(
     match status {
         JobStatus::Queued => {
             // terminalize immediately
+            let cancelled = JobStatus::Cancelled.as_str();
+
             sqlx::query!(
                 r#"
                 UPDATE grading_jobs
-                SET status = 'cancelled',
+                SET status = $3,
                     cancel_requested_at = COALESCE(cancel_requested_at, $2),
                     cancel_expires_at = NULL,
                     finished_at = $2,
@@ -290,6 +292,7 @@ pub async fn cancel_job(
                 "#,
                 job_id,
                 now,
+                cancelled,
             )
             .execute(&mut *tx)
             .await
@@ -358,7 +361,10 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use cmsx_core::{GradingResult, JobResultRequest, WorkerHeartbeatRequest, WorkerStatus};
+    use cmsx_core::{
+        GradingResult, JobResultRequest, JobStatus, ResultStatus, WorkerHeartbeatRequest,
+        WorkerStatus,
+    };
 
     use crate::test_support;
 
@@ -393,7 +399,7 @@ mod tests {
         assert_eq!(body["id"], setup.job_id.to_string());
         assert_eq!(body["submission_id"], setup.submission_id.to_string());
         assert_eq!(body["assignment_slug"], test_support::TEST_ASSIGNMENT_SLUG);
-        assert_eq!(body["status"], "queued");
+        assert_eq!(body["status"], JobStatus::Queued.as_str());
         assert!(body["worker_id"].is_null());
         assert!(body["result"].is_null());
     }
@@ -407,7 +413,7 @@ mod tests {
         let (status, body) = test_support::response_json(response).await;
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["status"], "claimed");
+        assert_eq!(body["status"], JobStatus::Claimed.as_str());
         assert_eq!(body["worker_name"], test_support::TEST_WORKER_NAME);
         assert_eq!(body["attempts"], 1);
         assert!(!body["worker_id"].is_null());
@@ -423,8 +429,8 @@ mod tests {
         let (status, body) = test_support::response_json(response).await;
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["status"], "succeeded");
-        assert_eq!(body["result"]["status"], "passed");
+        assert_eq!(body["status"], JobStatus::Succeeded.as_str());
+        assert_eq!(body["result"]["status"], ResultStatus::Passed.as_str());
         assert_eq!(body["result"]["score"], 100.0);
         assert_eq!(body["result"]["max_score"], 100.0);
         assert_eq!(body["result"]["duration_ms"], 123);
@@ -608,9 +614,12 @@ mod tests {
         .await
         .expect("failed to load cancelled job");
 
-        assert_eq!(row.status, "cancelled");
+        assert_eq!(row.status, JobStatus::Cancelled.as_str());
         assert!(row.finished_at.is_some());
-        assert_eq!(row.result_status.as_deref(), Some("cancelled"));
+        assert_eq!(
+            row.result_status.as_deref(),
+            Some(ResultStatus::Cancelled.as_str())
+        );
     }
 
     #[tokio::test]
@@ -813,8 +822,11 @@ mod tests {
         .await
         .expect("failed to load cancelled claimed job");
 
-        assert_eq!(row.status, "cancelled");
-        assert_eq!(row.result_status.as_deref(), Some("cancelled"));
+        assert_eq!(row.status, JobStatus::Cancelled.as_str());
+        assert_eq!(
+            row.result_status.as_deref(),
+            Some(ResultStatus::Cancelled.as_str())
+        );
     }
 
     #[tokio::test]
@@ -853,7 +865,7 @@ mod tests {
         .await
         .expect("failed to load cancelled running job");
 
-        assert_eq!(row.status, "running");
+        assert_eq!(row.status, JobStatus::Running.as_str());
         assert!(row.cancel_requested_at.is_some());
         assert!(row.result_status.is_none());
     }
@@ -910,8 +922,11 @@ mod tests {
         .await
         .expect("failed to load expired cancelled job");
 
-        assert_eq!(row.status, "cancelled");
-        assert_eq!(row.result_status.as_deref(), Some("cancelled"));
+        assert_eq!(row.status, JobStatus::Cancelled.as_str());
+        assert_eq!(
+            row.result_status.as_deref(),
+            Some(ResultStatus::Cancelled.as_str())
+        );
     }
 
     #[tokio::test]
@@ -953,7 +968,7 @@ mod tests {
         .await
         .expect("failed to load cancelled running job");
 
-        assert_eq!(row.status, "running");
+        assert_eq!(row.status, JobStatus::Running.as_str());
         assert!(row.cancel_requested_at.is_some());
         assert!(row.failure_reason.is_none());
     }
@@ -1023,8 +1038,11 @@ mod tests {
         .await
         .expect("failed to load cancelled job");
 
-        assert_eq!(row.status, "cancelled");
-        assert_eq!(row.result_status.as_deref(), Some("cancelled"));
+        assert_eq!(row.status, JobStatus::Cancelled.as_str());
+        assert_eq!(
+            row.result_status.as_deref(),
+            Some(ResultStatus::Cancelled.as_str())
+        );
     }
 
     #[tokio::test]
@@ -1157,7 +1175,10 @@ mod tests {
         .await
         .expect("failed to load swept job");
 
-        assert_eq!(row.status, "cancelled");
-        assert_eq!(row.result_status.as_deref(), Some("cancelled"));
+        assert_eq!(row.status, JobStatus::Cancelled.as_str());
+        assert_eq!(
+            row.result_status.as_deref(),
+            Some(ResultStatus::Cancelled.as_str())
+        );
     }
 }

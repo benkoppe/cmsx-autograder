@@ -17,6 +17,8 @@ use sha2::{Digest, Sha256};
 use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
+use cmsx_core::JobStatus;
+
 use crate::{app::AppState, error::ApiError};
 
 pub fn router(max_body_bytes: usize) -> Router<AppState> {
@@ -163,6 +165,8 @@ pub async fn submit(
             .await?;
         }
 
+        let queued = JobStatus::Queued.as_str();
+
         sqlx::query!(
             r#"
         INSERT INTO grading_jobs (
@@ -173,11 +177,12 @@ pub async fn submit(
             attempts,
             queued_at
         )
-        VALUES ($1, $2, $3, 'queued', 0, $4)
+        VALUES ($1, $2, $3, $4, 0, $5)
         "#,
             job_id,
             submission_id,
             assignment.id,
+            queued,
             now
         )
         .execute(&mut *tx)
