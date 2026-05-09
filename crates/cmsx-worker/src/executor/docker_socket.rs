@@ -12,22 +12,24 @@ use bollard::{
 };
 use futures_util::StreamExt;
 use serde::Deserialize;
+use serde_json::json;
 use tokio::{task::JoinHandle, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 use cmsx_core::ClaimedJob;
 
-const RUNNER_USER: &str = "10001:10001";
-const RUNNER_HOME: &str = "/tmp";
-
 use crate::{
     config::DockerSocketExecutorConfig,
+    events::{ExecutorEvent, ExecutorEventSink, event_type},
     executor::{
         ExecutionOutput, ExecutionStatus,
         utils::{OutputSummaries, normalize_timeout_seconds},
     },
     workspace::JobWorkspace,
 };
+
+const RUNNER_USER: &str = "10001:10001";
+const RUNNER_HOME: &str = "/tmp";
 
 #[derive(Clone)]
 pub struct DockerSocketExecutor {
@@ -74,6 +76,7 @@ impl DockerSocketExecutor {
         job: &ClaimedJob,
         workspace: &JobWorkspace,
         cancel: CancellationToken,
+        event_sink: ExecutorEventSink,
     ) -> Result<ExecutionOutput> {
         let config = parse_docker_job_config(job, &self.config)?;
         let started = Instant::now();
@@ -83,8 +86,30 @@ impl DockerSocketExecutor {
             .create_container(&container_name, &config, workspace)
             .await?;
 
+        event_sink.emit(ExecutorEvent::worker(
+            event_type::EXECUTOR_CONTAINER_CREATED,
+            "Docker container created",
+            json!({
+                "container_id": container.id,
+                "container_name": container_name,
+            }),
+        ));
+
         let container_id = container.id;
-        let logs_task = tokio::spawn(collect_logs(self.docker.clone(), container_id.clone()));
+        let logs_task = tokio::spawn(collect_logs(
+            self.docker.clone(),
+            container_id.clone(),
+            event_sink.clone(),
+        ));
+
+        event_sink.emit(ExecutorEvent::worker(
+            event_type::EXECUTOR_CONTAINER_STARTED,
+            "Docker container started",
+            json!({
+                "container_id": container_id,
+                "container_name": container_name,
+            }),
+        ));
 
         let status = match self
             .start_and_wait(&container_id, config.timeout_seconds, cancel)
@@ -386,7 +411,11 @@ async fn cleanup_container(docker: &Docker, container_id: &str) {
     }
 }
 
-async fn collect_logs(docker: Docker, container_id: String) -> OutputSummaries {
+async fn collect_logs(
+    docker: Docker,
+    container_id: String,
+    event_sink: ExecutorEventSink,
+) -> OutputSummaries {
     let options = LogsOptionsBuilder::default()
         .follow(true)
         .stdout(true)
@@ -400,9 +429,24 @@ async fn collect_logs(docker: Docker, container_id: String) -> OutputSummaries {
 
     while let Some(item) = logs.next().await {
         match item {
-            Ok(LogOutput::StdOut { message }) => summaries.stdout.push(&message),
-            Ok(LogOutput::StdErr { message }) => summaries.stderr.push(&message),
-            Ok(LogOutput::Console { message }) => summaries.stdout.push(&message),
+            Ok(LogOutput::StdOut { message }) => {
+                summaries.stdout.push(&message);
+                event_sink.emit(ExecutorEvent::stdout(
+                    String::from_utf8_lossy(&message).into_owned(),
+                ));
+            }
+            Ok(LogOutput::StdErr { message }) => {
+                summaries.stderr.push(&message);
+                event_sink.emit(ExecutorEvent::stderr(
+                    String::from_utf8_lossy(&message).into_owned(),
+                ));
+            }
+            Ok(LogOutput::Console { message }) => {
+                summaries.stdout.push(&message);
+                event_sink.emit(ExecutorEvent::stdout(
+                    String::from_utf8_lossy(&message).into_owned(),
+                ));
+            }
             Ok(LogOutput::StdIn { .. }) => {}
             Err(error) => {
                 tracing::debug!(container_id, ?error, "Docker log stream ended with error");

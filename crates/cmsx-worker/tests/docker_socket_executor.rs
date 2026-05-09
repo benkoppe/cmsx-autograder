@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 use cmsx_core::ResultStatus;
 use cmsx_worker::{
     config::DockerSocketExecutorConfig,
+    events::ExecutorEventSink,
     executor::{DockerSocketExecutor, ExecutionStatus, docker_socket::container_name},
 };
 
@@ -85,6 +86,7 @@ async fn successful_grader_writes_result_json() {
             &fixture.job(json!({})),
             &fixture.workspace,
             CancellationToken::new(),
+            ExecutorEventSink::noop(),
         )
         .await
         .expect("executor failed");
@@ -130,6 +132,7 @@ async fn executor_sets_expected_environment_and_cwd() {
             &fixture.job(json!({})),
             &fixture.workspace,
             CancellationToken::new(),
+            ExecutorEventSink::noop(),
         )
         .await
         .expect("executor failed");
@@ -188,6 +191,7 @@ async fn grader_can_read_submission_files_and_metadata() {
             &fixture.job(json!({})),
             &fixture.workspace,
             CancellationToken::new(),
+            ExecutorEventSink::noop(),
         )
         .await
         .expect("executor failed");
@@ -223,6 +227,7 @@ async fn timeout_kills_container() {
             &fixture.job(json!({ "timeout_seconds": 1 })),
             &fixture.workspace,
             CancellationToken::new(),
+            ExecutorEventSink::noop(),
         )
         .await
         .expect("executor failed");
@@ -247,7 +252,12 @@ async fn container_is_removed_after_completion() {
     let name = container_name(&job);
 
     let output = executor(&fixture)
-        .run(&job, &fixture.workspace, CancellationToken::new())
+        .run(
+            &job,
+            &fixture.workspace,
+            CancellationToken::new(),
+            ExecutorEventSink::noop(),
+        )
         .await
         .expect("executor failed");
 
@@ -319,6 +329,7 @@ async fn read_only_root_blocks_root_writes_but_tmp_and_workspace_are_writable() 
             &fixture.job(json!({})),
             &fixture.workspace,
             CancellationToken::new(),
+            ExecutorEventSink::noop(),
         )
         .await
         .expect("executor failed");
@@ -356,6 +367,7 @@ async fn runner_uses_fixed_non_root_user() {
             &fixture.job(json!({})),
             &fixture.workspace,
             CancellationToken::new(),
+            ExecutorEventSink::noop(),
         )
         .await
         .expect("executor failed");
@@ -397,6 +409,7 @@ async fn network_is_disabled_by_default() {
             &fixture.job(json!({})),
             &fixture.workspace,
             CancellationToken::new(),
+            ExecutorEventSink::noop(),
         )
         .await
         .expect("executor failed");

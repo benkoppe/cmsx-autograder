@@ -1,11 +1,14 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use chrono::Utc;
 use reqwest::StatusCode;
 use serde_json::json;
-use tokio::sync::RwLock;
+use tokio::{
+    sync::{RwLock, mpsc, oneshot},
+    time::{Duration, MissedTickBehavior},
+};
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use cmsx_core::{
     ClaimedJob, GradingResult, JobEventBatchRequest, JobEventPayload, JobFailureRequest,
@@ -15,6 +18,7 @@ use cmsx_core::{
 use crate::{
     client::{ClientError, ControlPlaneClient, cap_message_bytes},
     config::WorkerConfig,
+    events::{ExecutorEvent, ExecutorEventSink, JobEventWriterCommand, event_type},
     executor::{ExecutionOutput, ExecutionStatus, Executor},
     worker::{CancellationReason, apply_cancellation_reason},
     workspace::{
@@ -43,24 +47,203 @@ struct JobLifecycle {
     job: ClaimedJob,
     cancel: CancellationToken,
     reason: Arc<RwLock<CancellationReason>>,
+    event_writer: JobEventWriterHandle,
+}
+
+const EVENT_BATCH_TARGET_EVENTS: usize = 50;
+const EVENT_BATCH_FLUSH_BYTES: usize = 64 * 1024;
+const EVENT_FLUSH_INTERVAL_MS: u64 = 250;
+
+#[derive(Clone)]
+struct JobEventWriterHandle {
+    sender: mpsc::UnboundedSender<JobEventWriterCommand>,
+}
+
+struct JobEventWriter {
+    client: ControlPlaneClient,
+    job_id: Uuid,
+    receiver: mpsc::UnboundedReceiver<JobEventWriterCommand>,
+    sequence: i64,
+    reason: Arc<RwLock<CancellationReason>>,
+    cancel: CancellationToken,
     events_enabled: bool,
-    terminal_posted_or_lost: bool,
-    events: JobEventSequencer,
+    buffer: Vec<JobEventPayload>,
+    buffered_bytes: usize,
 }
 
-struct JobEventSequencer {
-    next: i64,
-}
+impl JobEventWriterHandle {
+    fn spawn(
+        client: ControlPlaneClient,
+        job_id: Uuid,
+        reason: Arc<RwLock<CancellationReason>>,
+        cancel: CancellationToken,
+    ) -> Self {
+        let (sender, receiver) = mpsc::unbounded_channel();
 
-impl JobEventSequencer {
-    fn new() -> Self {
-        Self { next: 0 }
+        let writer = JobEventWriter {
+            client,
+            job_id,
+            receiver,
+            sequence: 0,
+            reason,
+            cancel,
+            events_enabled: true,
+            buffer: Vec::new(),
+            buffered_bytes: 0,
+        };
+
+        tokio::spawn(writer.run());
+
+        Self { sender }
     }
 
-    fn next(&mut self) -> i64 {
-        let sequence = self.next;
-        self.next += 1;
-        sequence
+    fn sink(&self) -> ExecutorEventSink {
+        ExecutorEventSink::new(self.sender.clone())
+    }
+
+    fn emit(&self, event: ExecutorEvent) {
+        if self
+            .sender
+            .send(JobEventWriterCommand::Event(event))
+            .is_err()
+        {
+            tracing::debug!("job event writer is closed; dropping event");
+        }
+    }
+
+    async fn flush(&self) {
+        let (sender, receiver) = oneshot::channel();
+
+        if self
+            .sender
+            .send(JobEventWriterCommand::Flush(sender))
+            .is_err()
+        {
+            return;
+        }
+
+        let _ = receiver.await;
+    }
+
+    fn disable(&self) {
+        let _ = self.sender.send(JobEventWriterCommand::Disable);
+    }
+
+    async fn shutdown(&self) {
+        let (sender, receiver) = oneshot::channel();
+
+        if self
+            .sender
+            .send(JobEventWriterCommand::Shutdown(sender))
+            .is_err()
+        {
+            return;
+        }
+
+        let _ = receiver.await;
+    }
+}
+
+impl JobEventWriter {
+    async fn run(mut self) {
+        let mut interval = tokio::time::interval(Duration::from_millis(EVENT_FLUSH_INTERVAL_MS));
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    self.flush_buffer().await;
+                }
+                command = self.receiver.recv() => {
+                    match command {
+                        Some(JobEventWriterCommand::Event(event)) => {
+                            self.push_event(event).await;
+                        }
+                        Some(JobEventWriterCommand::Flush(reply)) => {
+                            self.flush_buffer().await;
+                            let _ = reply.send(());
+                        }
+                        Some(JobEventWriterCommand::Disable) => {
+                            self.events_enabled = false;
+                            self.buffer.clear();
+                            self.buffered_bytes = 0;
+                        }
+                        Some(JobEventWriterCommand::Shutdown(reply)) => {
+                            self.flush_buffer().await;
+                            self.events_enabled = false;
+                            let _ = reply.send(());
+                            break;
+                        }
+                        None => {
+                            self.flush_buffer().await;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn push_event(&mut self, event: ExecutorEvent) {
+        if !self.events_enabled {
+            return;
+        }
+
+        if *self.reason.read().await == CancellationReason::LeaseLost {
+            self.events_enabled = false;
+            self.buffer.clear();
+            self.buffered_bytes = 0;
+            return;
+        }
+
+        let message_len = event.message.len();
+        let payload = event.into_payload(self.sequence);
+        self.sequence += 1;
+
+        self.buffered_bytes = self.buffered_bytes.saturating_add(message_len);
+        self.buffer.push(payload);
+
+        if self.buffer.len() >= EVENT_BATCH_TARGET_EVENTS
+            || self.buffered_bytes >= EVENT_BATCH_FLUSH_BYTES
+        {
+            self.flush_buffer().await;
+        }
+    }
+
+    async fn flush_buffer(&mut self) {
+        if self.buffer.is_empty() || !self.events_enabled {
+            return;
+        }
+
+        let events = std::mem::take(&mut self.buffer);
+        self.buffered_bytes = 0;
+
+        let request = JobEventBatchRequest { events };
+
+        match self.client.post_events(self.job_id, &request).await {
+            Ok(()) => {}
+            Err(error) if error.is_status(StatusCode::NOT_FOUND) => {
+                self.events_enabled = false;
+                self.mark_lease_lost().await;
+                self.cancel.cancel();
+                tracing::info!(
+                    job_id = %self.job_id,
+                    "event batch post returned 404; marking lease lost"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    job_id = %self.job_id,
+                    ?error,
+                    "event batch post failed"
+                );
+            }
+        }
+    }
+
+    async fn mark_lease_lost(&self) {
+        let mut current = self.reason.write().await;
+        apply_cancellation_reason(&mut current, CancellationReason::LeaseLost);
     }
 }
 
@@ -72,14 +255,15 @@ pub async fn run_job(
     cancel: CancellationToken,
     reason: Arc<RwLock<CancellationReason>>,
 ) -> Result<()> {
+    let event_writer =
+        JobEventWriterHandle::spawn(client.clone(), job.id, reason.clone(), cancel.clone());
+
     let mut lifecycle = JobLifecycle {
         client,
         job,
         cancel,
         reason,
-        events_enabled: true,
-        terminal_posted_or_lost: false,
-        events: JobEventSequencer::new(),
+        event_writer,
     };
 
     if lifecycle.handle_pre_start_cancellation().await {
@@ -136,6 +320,8 @@ pub async fn run_job(
             "failed to cleanup job workspace"
         );
     }
+
+    lifecycle.event_writer.shutdown().await;
 
     Ok(())
 }
@@ -200,9 +386,7 @@ impl JobLifecycle {
         }
 
         self.post_event(
-            "job.input.prepared",
-            "worker",
-            "staff",
+            event_type::JOB_INPUT_PREPARED,
             "Input files prepared",
             json!({}),
         )
@@ -255,9 +439,7 @@ impl JobLifecycle {
         let executor_backend = executor.backend_name();
 
         self.post_event(
-            "executor.started",
-            "worker",
-            "staff",
+            event_type::EXECUTOR_STARTED,
             "Executor started",
             json!({ "backend": executor_backend }),
         )
@@ -273,7 +455,12 @@ impl JobLifecycle {
         }
 
         let output = match executor
-            .run(&self.job, workspace, self.cancel.clone())
+            .run(
+                &self.job,
+                workspace,
+                self.cancel.clone(),
+                self.event_writer.sink(),
+            )
             .await
         {
             Ok(output) => output,
@@ -288,7 +475,6 @@ impl JobLifecycle {
             }
         };
 
-        self.post_output_events(&output).await;
         self.handle_execution_output(workspace, output).await;
 
         Ok(())
@@ -299,9 +485,7 @@ impl JobLifecycle {
             ExecutionStatus::Exited { code } => {
                 let result = read_bounded_result_json(&workspace.result_path).await;
                 self.post_event(
-                    "result.read",
-                    "worker",
-                    "staff",
+                    event_type::RESULT_READ,
                     "Result file read",
                     json!({ "status": result_read_event_status(&result) }),
                 )
@@ -339,7 +523,7 @@ impl JobLifecycle {
             }
             ExecutionStatus::TimedOut => {
                 if self.current_reason().await != CancellationReason::LeaseLost {
-                    self.post_event("job.timeout", "worker", "staff", "Job timed out", json!({}))
+                    self.post_event(event_type::JOB_TIMEOUT, "Job timed out", json!({}))
                         .await;
                     self.post_failed(FAILURE_TIMEOUT, "Job timed out".to_string(), false)
                         .await;
@@ -347,14 +531,8 @@ impl JobLifecycle {
             }
             ExecutionStatus::Cancelled => match self.current_reason().await {
                 CancellationReason::ControlPlaneCancelled => {
-                    self.post_event(
-                        "job.cancelled",
-                        "worker",
-                        "staff",
-                        "Job cancelled",
-                        json!({}),
-                    )
-                    .await;
+                    self.post_event(event_type::JOB_CANCELLED, "Job cancelled", json!({}))
+                        .await;
 
                     match read_bounded_result_json(&workspace.result_path).await {
                         Ok(result) => {
@@ -505,6 +683,8 @@ impl JobLifecycle {
                     "post_started returned 404; marking lease lost"
                 );
 
+                self.event_writer.flush().await;
+
                 let failure = JobFailureRequest {
                     reason: FAILURE_LEASE_LOST.to_string(),
                     message: "job ownership was lost before start".to_string(),
@@ -536,6 +716,8 @@ impl JobLifecycle {
             return;
         }
 
+        self.event_writer.flush().await;
+
         let request = JobResultRequest {
             result,
             duration_ms,
@@ -545,7 +727,7 @@ impl JobLifecycle {
 
         match self.client.post_result(self.job.id, &request).await {
             Ok(()) => {
-                self.stop_network_lifecycle_after_terminal();
+                self.stop_network_lifecycle_after_terminal().await;
             }
             Err(error) if error.is_status(StatusCode::BAD_REQUEST) => {
                 let message = rejected_result_message(&error);
@@ -557,7 +739,7 @@ impl JobLifecycle {
                     ?error,
                     "post_result returned 404; ownership lost"
                 );
-                self.stop_network_lifecycle_after_terminal();
+                self.stop_network_lifecycle_after_terminal().await;
             }
             Err(error) => {
                 tracing::warn!(
@@ -570,6 +752,8 @@ impl JobLifecycle {
     }
 
     async fn post_failed_after_rejected_result(&mut self, message: String) {
+        self.event_writer.flush().await;
+
         let request = JobFailureRequest {
             reason: FAILURE_RESULT_INVALID.to_string(),
             message: cap_failure_message(&message),
@@ -578,7 +762,7 @@ impl JobLifecycle {
 
         match self.client.post_failed(self.job.id, &request).await {
             Ok(()) => {
-                self.stop_network_lifecycle_after_terminal();
+                self.stop_network_lifecycle_after_terminal().await;
             }
             Err(error) if error.is_status(StatusCode::NOT_FOUND) => {
                 tracing::info!(
@@ -586,7 +770,7 @@ impl JobLifecycle {
                     ?error,
                     "post_failed result_invalid after rejected result returned 404; ownership lost"
                 );
-                self.stop_network_lifecycle_after_terminal();
+                self.stop_network_lifecycle_after_terminal().await;
             }
             Err(error) => {
                 tracing::warn!(
@@ -610,6 +794,8 @@ impl JobLifecycle {
             return;
         }
 
+        self.event_writer.flush().await;
+
         let request = JobFailureRequest {
             reason: reason.to_string(),
             message: cap_failure_message(&message),
@@ -618,7 +804,7 @@ impl JobLifecycle {
 
         match self.client.post_failed(self.job.id, &request).await {
             Ok(()) => {
-                self.stop_network_lifecycle_after_terminal();
+                self.stop_network_lifecycle_after_terminal().await;
             }
             Err(error) if error.is_status(StatusCode::NOT_FOUND) => {
                 tracing::info!(
@@ -626,7 +812,7 @@ impl JobLifecycle {
                     ?error,
                     "post_failed returned 404; ownership lost"
                 );
-                self.stop_network_lifecycle_after_terminal();
+                self.stop_network_lifecycle_after_terminal().await;
             }
             Err(error) => {
                 tracing::warn!(
@@ -638,81 +824,9 @@ impl JobLifecycle {
         }
     }
 
-    async fn post_event(
-        &mut self,
-        event_type: &str,
-        stream: &str,
-        visibility: &str,
-        message: &str,
-        data: serde_json::Value,
-    ) {
-        if self.terminal_posted_or_lost || !self.events_enabled {
-            return;
-        }
-
-        if self.current_reason().await == CancellationReason::LeaseLost {
-            self.events_enabled = false;
-            return;
-        }
-
-        let request = JobEventBatchRequest {
-            events: vec![JobEventPayload {
-                sequence: self.events.next(),
-                timestamp: Utc::now(),
-                event_type: event_type.to_string(),
-                stream: stream.to_string(),
-                visibility: visibility.to_string(),
-                message: message.to_string(),
-                data,
-            }],
-        };
-
-        match self.client.post_events(self.job.id, &request).await {
-            Ok(()) => {}
-            Err(error) if error.is_status(StatusCode::NOT_FOUND) => {
-                self.events_enabled = false;
-                self.mark_cancellation(CancellationReason::LeaseLost).await;
-                self.cancel.cancel();
-                tracing::info!(
-                    job_id = %self.job.id,
-                    "event post returned 404; marking lease lost"
-                );
-            }
-            Err(error) => {
-                tracing::warn!(
-                    job_id = %self.job.id,
-                    ?error,
-                    event_type,
-                    "event post failed"
-                );
-            }
-        }
-    }
-
-    async fn post_output_events(&mut self, output: &ExecutionOutput) {
-        if let Some(stdout) = &output.stdout_summary {
-            let message = cap_failure_message(stdout);
-            self.post_event(
-                "stdout",
-                "stdout",
-                "staff",
-                &message,
-                json!({ "summary": true }),
-            )
-            .await;
-        }
-
-        if let Some(stderr) = &output.stderr_summary {
-            let message = cap_failure_message(stderr);
-            self.post_event(
-                "stderr",
-                "stderr",
-                "staff",
-                &message,
-                json!({ "summary": true }),
-            )
-            .await;
-        }
+    async fn post_event(&mut self, event_type: &str, message: &str, data: serde_json::Value) {
+        self.event_writer
+            .emit(ExecutorEvent::worker(event_type, message, data));
     }
 
     async fn current_reason(&self) -> CancellationReason {
@@ -724,9 +838,9 @@ impl JobLifecycle {
         apply_cancellation_reason(&mut current, next);
     }
 
-    fn stop_network_lifecycle_after_terminal(&mut self) {
-        self.events_enabled = false;
-        self.terminal_posted_or_lost = true;
+    async fn stop_network_lifecycle_after_terminal(&mut self) {
+        self.event_writer.disable();
+        self.event_writer.shutdown().await;
     }
 }
 

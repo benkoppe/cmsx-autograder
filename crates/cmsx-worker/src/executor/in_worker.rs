@@ -13,9 +13,10 @@ use cmsx_core::ClaimedJob;
 
 use crate::{
     config::InWorkerExecutorConfig,
+    events::{ExecutorEvent, ExecutorEventSink},
     executor::{
         ExecutionOutput, ExecutionStatus,
-        utils::{SUMMARY_MAX_BYTES, bytes_to_bounded_summary, parse_timeout_seconds},
+        utils::{BoundedSummary, parse_timeout_seconds},
     },
     workspace::JobWorkspace,
 };
@@ -37,6 +38,7 @@ impl InWorkerExecutor {
         job: &ClaimedJob,
         workspace: &JobWorkspace,
         cancel: CancellationToken,
+        event_sink: ExecutorEventSink,
     ) -> Result<ExecutionOutput> {
         let timeout_seconds = parse_timeout_seconds(&job.execution_config);
         let started = Instant::now();
@@ -57,8 +59,12 @@ impl InWorkerExecutor {
         let stdout = child.stdout.take().context("child stdout was not piped")?;
         let stderr = child.stderr.take().context("child stderr was not piped")?;
 
-        let stdout_task = tokio::spawn(read_summary(stdout));
-        let stderr_task = tokio::spawn(read_summary(stderr));
+        let stdout_task = tokio::spawn(collect_output(
+            stdout,
+            OutputStream::Stdout,
+            event_sink.clone(),
+        ));
+        let stderr_task = tokio::spawn(collect_output(stderr, OutputStream::Stderr, event_sink));
 
         let status = tokio::select! {
             result = child.wait() => {
@@ -111,27 +117,41 @@ async fn join_summary(task: JoinHandle<Option<String>>) -> Option<String> {
     }
 }
 
-async fn read_summary<R>(mut reader: R) -> Option<String>
+#[derive(Debug, Clone, Copy)]
+enum OutputStream {
+    Stdout,
+    Stderr,
+}
+
+impl OutputStream {
+    fn event(self, message: String) -> ExecutorEvent {
+        match self {
+            Self::Stdout => ExecutorEvent::stdout(message),
+            Self::Stderr => ExecutorEvent::stderr(message),
+        }
+    }
+}
+
+async fn collect_output<R>(
+    mut reader: R,
+    stream: OutputStream,
+    event_sink: ExecutorEventSink,
+) -> Option<String>
 where
     R: AsyncRead + Unpin,
 {
-    let mut retained = Vec::with_capacity(SUMMARY_MAX_BYTES);
+    let mut summary = BoundedSummary::default();
     let mut buffer = [0_u8; 8192];
-    let mut truncated = false;
 
     loop {
         match reader.read(&mut buffer).await {
             Ok(0) => break,
             Ok(n) => {
-                let remaining = SUMMARY_MAX_BYTES.saturating_sub(retained.len());
-                if n <= remaining {
-                    retained.extend_from_slice(&buffer[..n]);
-                } else {
-                    if remaining > 0 {
-                        retained.extend_from_slice(&buffer[..remaining]);
-                    }
-                    truncated = true;
-                }
+                let chunk = &buffer[..n];
+                summary.push(chunk);
+
+                let message = String::from_utf8_lossy(chunk).into_owned();
+                event_sink.emit(stream.event(message));
             }
             Err(error) => {
                 tracing::warn!(?error, "failed reading process output");
@@ -140,11 +160,7 @@ where
         }
     }
 
-    if retained.is_empty() && !truncated {
-        return None;
-    }
-
-    Some(bytes_to_bounded_summary(retained, truncated))
+    summary.into_summary_string()
 }
 
 #[cfg(test)]
@@ -237,7 +253,12 @@ mod tests {
         };
 
         let output = executor
-            .run(&test_job(1), &workspace, CancellationToken::new())
+            .run(
+                &test_job(1),
+                &workspace,
+                CancellationToken::new(),
+                ExecutorEventSink::noop(),
+            )
             .await
             .unwrap();
 
@@ -272,7 +293,7 @@ mod tests {
         });
 
         let output = executor
-            .run(&test_job(60), &workspace, cancel)
+            .run(&test_job(60), &workspace, cancel, ExecutorEventSink::noop())
             .await
             .unwrap();
 
@@ -303,7 +324,12 @@ mod tests {
         };
 
         let output = executor
-            .run(&test_job(60), &workspace, CancellationToken::new())
+            .run(
+                &test_job(60),
+                &workspace,
+                CancellationToken::new(),
+                ExecutorEventSink::noop(),
+            )
             .await
             .unwrap();
 
