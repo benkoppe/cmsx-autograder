@@ -10,7 +10,7 @@ use serde_json::Value;
 use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
-use cmsx_core::{GradingResult, JobStatus, ResultStatus, protocol::GRADING_RESULT_SCHEMA_VERSION};
+use cmsx_core::{GradingResult, JobStatus};
 
 use crate::{
     app::AppState,
@@ -322,7 +322,7 @@ async fn insert_cancelled_result(
     job_id: Uuid,
     now: DateTime<Utc>,
 ) -> Result<(), ApiError> {
-    let result = cancelled_result();
+    let result = GradingResult::cancelled();
     let result_json = serde_json::to_value(&result).map_err(ApiError::internal)?;
     let tests_json = serde_json::to_value(&result.tests).map_err(ApiError::internal)?;
 
@@ -359,18 +359,6 @@ async fn insert_cancelled_result(
     Ok(())
 }
 
-fn cancelled_result() -> GradingResult {
-    GradingResult {
-        schema_version: GRADING_RESULT_SCHEMA_VERSION.to_string(),
-        status: ResultStatus::Cancelled,
-        score: 0.0,
-        max_score: 0.0,
-        feedback: Some("Job cancelled".to_string()),
-        tests: Vec::new(),
-        artifacts: Vec::new(),
-    }
-}
-
 async fn ensure_job_exists(state: &AppState, job_id: Uuid) -> Result<(), ApiError> {
     let exists = sqlx::query_scalar!(
         r#"
@@ -400,9 +388,18 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use cmsx_core::{WorkerHeartbeatRequest, WorkerStatus};
+    use cmsx_core::{GradingResult, JobResultRequest, WorkerHeartbeatRequest, WorkerStatus};
 
     use crate::test_support;
+
+    fn cancelled_result_request() -> JobResultRequest {
+        JobResultRequest {
+            result: GradingResult::cancelled(),
+            duration_ms: Some(0),
+            stdout_summary: None,
+            stderr_summary: None,
+        }
+    }
 
     #[tokio::test]
     async fn job_routes_reject_missing_admin_token() {
@@ -800,5 +797,108 @@ mod tests {
         assert_eq!(get_job.status(), StatusCode::NOT_FOUND);
         assert_eq!(cancel_job.status(), StatusCode::NOT_FOUND);
         assert_eq!(get_events.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn cancelled_claimed_job_rejects_start_but_accepts_cancelled_result() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_claimed_job(&app).await;
+
+        let cancel_response = test_support::admin_post_json(
+            &app.app,
+            &format!("/jobs/{}/cancel", setup.job_id),
+            &json!({}),
+        )
+        .await;
+        assert_eq!(cancel_response.status(), StatusCode::NO_CONTENT);
+
+        let start_response = test_support::worker_post_json(
+            &app.app,
+            &setup.private_key,
+            &format!("/workers/jobs/{}/started", setup.job_id),
+            &json!({}),
+        )
+        .await;
+        assert_eq!(start_response.status(), StatusCode::CONFLICT);
+
+        let result_response = test_support::worker_post_json(
+            &app.app,
+            &setup.private_key,
+            &format!("/workers/jobs/{}/result", setup.job_id),
+            &cancelled_result_request(),
+        )
+        .await;
+        assert_eq!(result_response.status(), StatusCode::NO_CONTENT);
+
+        let row = sqlx::query!(
+            r#"
+            SELECT grading_jobs.status, grading_results.status AS "result_status?"
+            FROM grading_jobs
+            LEFT JOIN grading_results ON grading_results.job_id = grading_jobs.id
+            WHERE grading_jobs.id = $1
+            "#,
+            setup.job_id,
+        )
+        .fetch_one(&app.db)
+        .await
+        .expect("failed to load cancelled claimed job");
+
+        assert_eq!(row.status, "cancelled");
+        assert_eq!(row.result_status.as_deref(), Some("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn expired_cancelled_active_job_gets_cancelled_result() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_running_job(&app).await;
+
+        let cancel_response = test_support::admin_post_json(
+            &app.app,
+            &format!("/jobs/{}/cancel", setup.job_id),
+            &json!({}),
+        )
+        .await;
+        assert_eq!(cancel_response.status(), StatusCode::NO_CONTENT);
+
+        sqlx::query!(
+            r#"
+            UPDATE grading_jobs
+            SET lease_expires_at = $2
+            WHERE id = $1
+            "#,
+            setup.job_id,
+            chrono::Utc::now() - chrono::Duration::seconds(1),
+        )
+        .execute(&app.db)
+        .await
+        .expect("failed to expire cancelled job lease");
+
+        let claim_response = test_support::worker_post_json(
+            &app.app,
+            &setup.private_key,
+            "/workers/jobs/claim",
+            &cmsx_core::ClaimJobRequest {
+                available_slots: 1,
+                wait_seconds: Some(0),
+            },
+        )
+        .await;
+        assert_eq!(claim_response.status(), StatusCode::OK);
+
+        let row = sqlx::query!(
+            r#"
+            SELECT grading_jobs.status, grading_results.status AS "result_status?"
+            FROM grading_jobs
+            LEFT JOIN grading_results ON grading_results.job_id = grading_jobs.id
+            WHERE grading_jobs.id = $1
+            "#,
+            setup.job_id,
+        )
+        .fetch_one(&app.db)
+        .await
+        .expect("failed to load expired cancelled job");
+
+        assert_eq!(row.status, "cancelled");
+        assert_eq!(row.result_status.as_deref(), Some("cancelled"));
     }
 }

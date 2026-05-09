@@ -95,6 +95,20 @@ pub struct GradingResult {
     pub artifacts: Vec<String>,
 }
 
+impl GradingResult {
+    pub fn cancelled() -> Self {
+        Self {
+            schema_version: protocol::GRADING_RESULT_SCHEMA_VERSION.to_string(),
+            status: ResultStatus::Cancelled,
+            score: 0.0,
+            max_score: 0.0,
+            feedback: Some("Job cancelled".to_string()),
+            tests: Vec::new(),
+            artifacts: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResultStatus {

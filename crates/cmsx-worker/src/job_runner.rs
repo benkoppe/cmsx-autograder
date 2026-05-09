@@ -12,10 +12,8 @@ use uuid::Uuid;
 
 use cmsx_core::{
     ClaimedJob, GradingResult, JobEventBatchRequest, JobEventPayload, JobFailureRequest,
-    JobResultRequest, ResultStatus,
-    protocol::{
-        GRADING_RESULT_SCHEMA_VERSION, JOB_EVENT_MESSAGE_MAX_BYTES, cap_text, job_event_type,
-    },
+    JobResultRequest,
+    protocol::{JOB_EVENT_MESSAGE_MAX_BYTES, cap_text, job_event_type},
 };
 
 use crate::{
@@ -551,7 +549,7 @@ impl JobLifecycle {
                         }
                         Err(_) => {
                             self.post_result(
-                                explicit_cancelled_result(),
+                                GradingResult::cancelled(),
                                 Some(output.duration_ms),
                                 &output,
                             )
@@ -579,7 +577,7 @@ impl JobLifecycle {
         match error {
             MaterializeInputError::Cancelled => match self.current_reason().await {
                 CancellationReason::ControlPlaneCancelled => {
-                    self.post_result(explicit_cancelled_result(), None, &empty_output())
+                    self.post_result(GradingResult::cancelled(), None, &empty_output())
                         .await;
                 }
                 CancellationReason::LeaseLost => {
@@ -630,7 +628,7 @@ impl JobLifecycle {
 
         match self.current_reason().await {
             CancellationReason::ControlPlaneCancelled => {
-                self.post_result(explicit_cancelled_result(), None, &empty_output())
+                self.post_result(GradingResult::cancelled(), None, &empty_output())
                     .await;
                 true
             }
@@ -654,7 +652,7 @@ impl JobLifecycle {
     async fn handle_cancelled_before_executor(&mut self) {
         match self.current_reason().await {
             CancellationReason::ControlPlaneCancelled => {
-                self.post_result(explicit_cancelled_result(), None, &empty_output())
+                self.post_result(GradingResult::cancelled(), None, &empty_output())
                     .await;
             }
             CancellationReason::LeaseLost => {
@@ -675,7 +673,7 @@ impl JobLifecycle {
     async fn handle_post_started_404(&mut self) {
         match self.current_reason().await {
             CancellationReason::ControlPlaneCancelled => {
-                self.post_result(explicit_cancelled_result(), None, &empty_output())
+                self.post_result(GradingResult::cancelled(), None, &empty_output())
                     .await;
             }
             CancellationReason::LeaseLost => {
@@ -1051,18 +1049,6 @@ pub fn should_post_terminal_for_reason(reason: CancellationReason) -> bool {
     !matches!(reason, CancellationReason::LeaseLost)
 }
 
-fn explicit_cancelled_result() -> GradingResult {
-    GradingResult {
-        schema_version: GRADING_RESULT_SCHEMA_VERSION.to_string(),
-        status: ResultStatus::Cancelled,
-        score: 0.0,
-        max_score: 0.0,
-        feedback: Some("Job cancelled".to_string()),
-        tests: Vec::new(),
-        artifacts: Vec::new(),
-    }
-}
-
 fn empty_output() -> ExecutionOutput {
     ExecutionOutput {
         status: ExecutionStatus::Cancelled,
@@ -1097,6 +1083,8 @@ fn rejected_result_message(error: &ClientError) -> String {
 
 #[cfg(test)]
 mod tests {
+    use cmsx_core::ResultStatus;
+
     use super::*;
 
     #[test]
@@ -1114,10 +1102,13 @@ mod tests {
     }
 
     #[test]
-    fn explicit_cancelled_result_shape() {
-        let result = explicit_cancelled_result();
+    fn cancelled_result_shape() {
+        let result = GradingResult::cancelled();
 
-        assert_eq!(result.schema_version, GRADING_RESULT_SCHEMA_VERSION);
+        assert_eq!(
+            result.schema_version,
+            cmsx_core::protocol::GRADING_RESULT_SCHEMA_VERSION
+        );
         assert!(matches!(result.status, ResultStatus::Cancelled));
         assert_eq!(result.score, 0.0);
         assert_eq!(result.max_score, 0.0);
