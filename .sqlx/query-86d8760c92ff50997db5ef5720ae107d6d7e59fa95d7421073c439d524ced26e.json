@@ -1,0 +1,77 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO assignments (\n            id,\n            slug,\n            name,\n            max_score,\n            execution_config,\n            runner_config,\n            capabilities,\n            created_at,\n            updated_at\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)\n        RETURNING\n            id,\n            slug,\n            name,\n            max_score,\n            execution_config AS \"execution_config: SqlxJson<Value>\",\n            runner_config AS \"runner_config: SqlxJson<Value>\",\n            capabilities AS \"capabilities: SqlxJson<Value>\",\n            created_at,\n            updated_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "slug",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "max_score",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 4,
+        "name": "execution_config: SqlxJson<Value>",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 5,
+        "name": "runner_config: SqlxJson<Value>",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 6,
+        "name": "capabilities: SqlxJson<Value>",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Float8",
+        "Jsonb",
+        "Jsonb",
+        "Jsonb",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "86d8760c92ff50997db5ef5720ae107d6d7e59fa95d7421073c439d524ced26e"
+}

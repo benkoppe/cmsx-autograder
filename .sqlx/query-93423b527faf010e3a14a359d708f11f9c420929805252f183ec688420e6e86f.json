@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE worker_keys\n        SET revoked_at = $3\n        WHERE id = $1\n          AND worker_id = $2\n          AND revoked_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "93423b527faf010e3a14a359d708f11f9c420929805252f183ec688420e6e86f"
+}

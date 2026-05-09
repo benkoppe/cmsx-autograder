@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE assignment_tokens\n        SET revoked_at = $3\n        WHERE id = $1\n          AND assignment_id = $2\n          AND revoked_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f82ab3763cd00f05fa56f6539236c799ec275d641350abb79856f0cbf89c3a6e"
+}

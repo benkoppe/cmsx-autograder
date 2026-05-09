@@ -1,0 +1,68 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            id,\n            slug,\n            name,\n            max_score,\n            execution_config AS \"execution_config: SqlxJson<Value>\",\n            runner_config AS \"runner_config: SqlxJson<Value>\",\n            capabilities AS \"capabilities: SqlxJson<Value>\",\n            created_at,\n            updated_at\n        FROM assignments\n        ORDER BY created_at DESC, id DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "slug",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "max_score",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 4,
+        "name": "execution_config: SqlxJson<Value>",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 5,
+        "name": "runner_config: SqlxJson<Value>",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 6,
+        "name": "capabilities: SqlxJson<Value>",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "8179fcb2893abae4626367a7f5d1a6a47e2fdcc9d25e357b9f0cd3e8d2fde2b5"
+}
