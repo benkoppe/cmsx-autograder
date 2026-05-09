@@ -848,6 +848,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_running_job_rejects_non_cancelled_result() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_running_job(&app).await;
+
+        let cancel_response = test_support::admin_post_json(
+            &app.app,
+            &format!("/jobs/{}/cancel", setup.job_id),
+            &json!({}),
+        )
+        .await;
+        assert_eq!(cancel_response.status(), StatusCode::NO_CONTENT);
+
+        let result_response = test_support::worker_post_json(
+            &app.app,
+            &setup.private_key,
+            &format!("/workers/jobs/{}/result", setup.job_id),
+            &test_support::test_job_result_request(),
+        )
+        .await;
+
+        assert_eq!(result_response.status(), StatusCode::CONFLICT);
+
+        let row = sqlx::query!(
+            r#"
+            SELECT grading_jobs.status, grading_jobs.cancel_requested_at, grading_results.status AS "result_status?"
+            FROM grading_jobs
+            LEFT JOIN grading_results ON grading_results.job_id = grading_jobs.id
+            WHERE grading_jobs.id = $1
+            "#,
+            setup.job_id,
+        )
+        .fetch_one(&app.db)
+        .await
+        .expect("failed to load cancelled running job");
+
+        assert_eq!(row.status, "running");
+        assert!(row.cancel_requested_at.is_some());
+        assert!(row.result_status.is_none());
+    }
+
+    #[tokio::test]
     async fn expired_cancelled_active_job_gets_cancelled_result() {
         let app = test_support::test_app().await;
         let setup = test_support::setup_running_job(&app).await;

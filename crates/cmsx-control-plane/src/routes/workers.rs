@@ -941,7 +941,13 @@ pub async fn post_result(
           AND worker_id = $2
           AND lease_expires_at > $4
           AND (
-            status = 'running'
+            (
+                status = 'running'
+                AND (
+                    cancel_requested_at IS NULL
+                    OR $5
+                )
+            )
             OR (
                 $5
                 AND status = 'claimed'
@@ -960,6 +966,31 @@ pub async fn post_result(
     .map_err(ApiError::internal)?;
 
     if update.rows_affected() != 1 {
+        if !is_cancelled_result {
+            let cancellation_requested = sqlx::query_scalar!(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM grading_jobs
+                    WHERE id = $1
+                      AND worker_id = $2
+                      AND status IN ('claimed', 'running')
+                      AND lease_expires_at > $3
+                      AND cancel_requested_at IS NOT NULL
+                )
+                "#,
+                job_id,
+                worker.id,
+                now,
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(ApiError::internal)?
+            .unwrap_or(false);
+            if cancellation_requested {
+                return Err(ApiError::conflict("job cancellation requested"));
+            }
+        }
         return Err(ApiError::not_found("active job not found"));
     }
 
