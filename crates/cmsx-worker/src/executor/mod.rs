@@ -5,7 +5,7 @@ pub mod utils;
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
-use cmsx_core::ClaimedJob;
+use cmsx_core::{ClaimedJob, GradingResult};
 
 use crate::{events::ExecutorEventSink, workspace::JobWorkspace};
 
@@ -53,4 +53,10 @@ impl Executor {
             Self::InWorker(_) => "in-worker",
         }
     }
+}
+
+pub fn passed_score(result: &GradingResult, score: f64, max_score: f64) {
+    assert!(matches!(result.status, cmsx_core::ResultStatus::Passed));
+    assert_eq!(result.score, score);
+    assert_eq!(result.max_score, max_score);
 }

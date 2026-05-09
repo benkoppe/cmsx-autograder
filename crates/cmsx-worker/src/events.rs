@@ -114,8 +114,6 @@ impl ExecutorEventSink {
 
 #[cfg(test)]
 mod tests {
-    use cmsx_core::protocol::TEXT_TRUNCATION_MARKER;
-
     use super::*;
 
     #[test]
@@ -156,11 +154,13 @@ mod tests {
     }
 
     #[test]
-    fn event_message_is_capped_on_char_boundary() {
-        let event = ExecutorEvent::stdout("é".repeat(JOB_EVENT_MESSAGE_MAX_BYTES));
+    fn event_message_uses_shared_cap() {
+        let message = "é".repeat(JOB_EVENT_MESSAGE_MAX_BYTES);
+        let event = ExecutorEvent::stdout(message.clone());
 
-        assert!(event.message.len() <= JOB_EVENT_MESSAGE_MAX_BYTES);
-        assert!(event.message.ends_with(TEXT_TRUNCATION_MARKER));
-        assert!(event.message.is_char_boundary(event.message.len()));
+        assert_eq!(
+            event.message,
+            cap_text_with_marker(message, JOB_EVENT_MESSAGE_MAX_BYTES)
+        );
     }
 }

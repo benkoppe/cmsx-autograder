@@ -481,8 +481,8 @@ pub async fn post_test_job_events(
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 }
 
-pub async fn post_test_job_result(app: &TestApp, job: &TestClaimedJob) {
-    let result = JobResultRequest {
+pub fn test_job_result_request() -> JobResultRequest {
+    JobResultRequest {
         result: GradingResult {
             schema_version: GRADING_RESULT_SCHEMA_VERSION.to_string(),
             status: ResultStatus::Passed,
@@ -501,13 +501,15 @@ pub async fn post_test_job_result(app: &TestApp, job: &TestClaimedJob) {
         duration_ms: Some(123),
         stdout_summary: Some("stdout".to_string()),
         stderr_summary: None,
-    };
+    }
+}
 
+pub async fn post_test_job_result(app: &TestApp, job: &TestClaimedJob) {
     let response = worker_post_json(
         &app.app,
         &job.private_key,
         &format!("/workers/jobs/{}/result", job.job_id),
-        &result,
+        &test_job_result_request(),
     )
     .await;
 

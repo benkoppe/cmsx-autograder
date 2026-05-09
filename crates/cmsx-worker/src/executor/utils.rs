@@ -1,5 +1,8 @@
-use cmsx_core::protocol::{JOB_EVENT_MESSAGE_MAX_BYTES, TEXT_TRUNCATION_MARKER};
 use serde::Deserialize;
+
+use cmsx_core::protocol::{
+    JOB_EVENT_MESSAGE_MAX_BYTES, TEXT_TRUNCATION_MARKER, cap_text, cap_text_with_marker,
+};
 
 pub const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
 pub const MAX_TIMEOUT_SECONDS: u64 = 60 * 60;
@@ -80,27 +83,12 @@ pub fn bytes_to_bounded_summary(bytes: Vec<u8>, truncated: bool) -> String {
     summary.into_summary_string().unwrap_or_default()
 }
 
-pub fn cap_summary_string(mut value: String, truncated: bool) -> String {
-    if value.len() <= SUMMARY_MAX_BYTES {
-        return value;
-    }
-
-    let marker = if truncated {
-        TEXT_TRUNCATION_MARKER
+pub fn cap_summary_string(value: String, truncated: bool) -> String {
+    if truncated {
+        cap_text_with_marker(value, SUMMARY_MAX_BYTES)
     } else {
-        ""
-    };
-    let marker_len = marker.len();
-    let max_prefix = SUMMARY_MAX_BYTES.saturating_sub(marker_len);
-
-    let mut end = max_prefix;
-    while !value.is_char_boundary(end) {
-        end -= 1;
+        cap_text(&value, SUMMARY_MAX_BYTES)
     }
-
-    value.truncate(end);
-    value.push_str(marker);
-    value
 }
 
 #[cfg(test)]
@@ -163,15 +151,5 @@ mod tests {
 
         assert!(value.len() <= SUMMARY_MAX_BYTES);
         assert!(value.ends_with(TEXT_TRUNCATION_MARKER));
-    }
-
-    #[test]
-    fn cap_summary_preserves_char_boundary() {
-        let value = "é".repeat(SUMMARY_MAX_BYTES);
-        let capped = cap_summary_string(value, true);
-
-        assert!(capped.len() <= SUMMARY_MAX_BYTES);
-        assert!(capped.ends_with(TEXT_TRUNCATION_MARKER));
-        assert!(capped.is_char_boundary(capped.len()));
     }
 }

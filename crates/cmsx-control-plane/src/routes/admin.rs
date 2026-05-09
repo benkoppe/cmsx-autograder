@@ -914,13 +914,7 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use cmsx_core::{
-        ClaimJobRequest, GradingResult, JobEventBatchRequest, JobEventPayload, JobResultRequest,
-        ResultStatus, TestResult, WorkerHeartbeatRequest, WorkerStatus,
-        protocol::{
-            GRADING_RESULT_SCHEMA_VERSION, JobEventStream, JobEventVisibility, job_event_type,
-        },
-    };
+    use cmsx_core::{ClaimJobRequest, JobEventBatchRequest, WorkerHeartbeatRequest, WorkerStatus};
 
     use crate::test_support;
 
@@ -1291,15 +1285,7 @@ mod tests {
         assert_eq!(started_response.status(), StatusCode::NO_CONTENT);
 
         let events = JobEventBatchRequest {
-            events: vec![JobEventPayload {
-                sequence: 0,
-                timestamp: test_support::now_event_timestamp(),
-                event_type: job_event_type::JOB_STARTED.to_string(),
-                stream: JobEventStream::Worker.as_str().to_string(),
-                visibility: JobEventVisibility::Staff.as_str().to_string(),
-                message: "Job started".to_string(),
-                data: json!({}),
-            }],
+            events: vec![test_support::test_event(0, "Job started")],
         };
 
         let events_response = test_support::worker_post_json(
@@ -1311,26 +1297,7 @@ mod tests {
         .await;
         assert_eq!(events_response.status(), StatusCode::NO_CONTENT);
 
-        let result = JobResultRequest {
-            result: GradingResult {
-                schema_version: GRADING_RESULT_SCHEMA_VERSION.to_string(),
-                status: ResultStatus::Passed,
-                score: 100.0,
-                max_score: 100.0,
-                feedback: Some("Looks good".to_string()),
-                tests: vec![TestResult {
-                    name: "smoke".to_string(),
-                    status: ResultStatus::Passed,
-                    score: 100.0,
-                    max_score: 100.0,
-                    message: Some("ok".to_string()),
-                }],
-                artifacts: vec![],
-            },
-            duration_ms: Some(123),
-            stdout_summary: Some("stdout".to_string()),
-            stderr_summary: None,
-        };
+        let result = test_support::test_job_result_request();
 
         let result_response = test_support::worker_post_json(
             &app.app,

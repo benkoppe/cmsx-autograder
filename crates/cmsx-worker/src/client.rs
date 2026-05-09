@@ -290,35 +290,9 @@ async fn read_bounded_error_body(response: reqwest::Response) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-pub fn cap_message_bytes(value: &str, max_bytes: usize) -> String {
-    if value.len() <= max_bytes {
-        return value.to_string();
-    }
-
-    let mut end = max_bytes;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-
-    value[..end].to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn cap_message_preserves_short_message() {
-        assert_eq!(cap_message_bytes("abc", 10), "abc");
-    }
-
-    #[test]
-    fn cap_message_truncates_on_char_boundary() {
-        let value = "ééé";
-        let capped = cap_message_bytes(value, 3);
-        assert_eq!(capped, "é");
-        assert!(capped.len() <= 3);
-    }
 
     #[test]
     fn client_error_exposes_status() {

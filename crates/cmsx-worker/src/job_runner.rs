@@ -13,11 +13,13 @@ use uuid::Uuid;
 use cmsx_core::{
     ClaimedJob, GradingResult, JobEventBatchRequest, JobEventPayload, JobFailureRequest,
     JobResultRequest, ResultStatus,
-    protocol::{GRADING_RESULT_SCHEMA_VERSION, JOB_EVENT_MESSAGE_MAX_BYTES, job_event_type},
+    protocol::{
+        GRADING_RESULT_SCHEMA_VERSION, JOB_EVENT_MESSAGE_MAX_BYTES, cap_text, job_event_type,
+    },
 };
 
 use crate::{
-    client::{ClientError, ControlPlaneClient, cap_message_bytes},
+    client::{ClientError, ControlPlaneClient},
     config::WorkerConfig,
     events::{ExecutorEvent, ExecutorEventSink, JobEventWriterCommand},
     executor::{ExecutionOutput, ExecutionStatus, Executor},
@@ -1078,7 +1080,7 @@ fn format_failure_message(prefix: &str, error: &dyn std::fmt::Display) -> String
 }
 
 fn cap_failure_message(message: &str) -> String {
-    cap_message_bytes(message, FAILURE_MESSAGE_MAX_BYTES)
+    cap_text(message, FAILURE_MESSAGE_MAX_BYTES)
 }
 
 fn rejected_result_message(error: &ClientError) -> String {
@@ -1239,15 +1241,6 @@ mod tests {
         assert!(!should_post_terminal_for_reason(
             CancellationReason::LeaseLost
         ));
-    }
-
-    #[test]
-    fn cap_failure_message_preserves_char_boundary() {
-        let value = "é".repeat(FAILURE_MESSAGE_MAX_BYTES);
-        let capped = cap_failure_message(&value);
-
-        assert!(capped.len() <= FAILURE_MESSAGE_MAX_BYTES);
-        assert!(capped.is_char_boundary(capped.len()));
     }
 
     #[test]

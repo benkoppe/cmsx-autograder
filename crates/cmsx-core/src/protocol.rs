@@ -76,36 +76,49 @@ impl JobEventVisibility {
     }
 }
 
-pub fn cap_text_with_marker(mut value: String, max_bytes: usize) -> String {
+pub fn cap_text(value: &str, max_bytes: usize) -> String {
+    cap_text_with_optional_marker(value, max_bytes, None)
+}
+
+pub fn cap_text_with_marker(value: String, max_bytes: usize) -> String {
+    cap_text_with_optional_marker(&value, max_bytes, Some(TEXT_TRUNCATION_MARKER))
+}
+
+fn cap_text_with_optional_marker(value: &str, max_bytes: usize, marker: Option<&str>) -> String {
     if value.len() <= max_bytes {
-        return value;
+        return value.to_string();
     }
 
     if max_bytes == 0 {
         return String::new();
     }
 
-    let marker_len = TEXT_TRUNCATION_MARKER.len();
+    let marker = marker.unwrap_or("");
+
+    if marker.is_empty() {
+        return truncate_to_char_boundary(value, max_bytes).to_string();
+    }
+
+    let marker_len = marker.len();
 
     if max_bytes <= marker_len {
-        truncate_to_char_boundary(&mut value, max_bytes);
-        return value;
+        return truncate_to_char_boundary(value, max_bytes).to_string();
     }
 
     let max_prefix = max_bytes - marker_len;
-    truncate_to_char_boundary(&mut value, max_prefix);
-    value.push_str(TEXT_TRUNCATION_MARKER);
-    value
+    let mut capped = truncate_to_char_boundary(value, max_prefix).to_string();
+    capped.push_str(marker);
+    capped
 }
 
-fn truncate_to_char_boundary(value: &mut String, max_bytes: usize) {
+fn truncate_to_char_boundary(value: &str, max_bytes: usize) -> &str {
     let mut end = max_bytes.min(value.len());
 
     while !value.is_char_boundary(end) {
         end -= 1;
     }
 
-    value.truncate(end);
+    &value[..end]
 }
 
 #[cfg(test)]
@@ -138,5 +151,13 @@ mod tests {
         let capped = cap_text_with_marker("abcdef".to_string(), 3);
 
         assert_eq!(capped.len(), 3);
+    }
+
+    #[test]
+    fn cap_text_truncates_without_marker() {
+        let capped = cap_text("ééé", 3);
+
+        assert_eq!(capped, "é");
+        assert!(capped.len() <= 3);
     }
 }
