@@ -1,0 +1,27 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH candidate AS (\n            SELECT grading_jobs.id\n            FROM grading_jobs\n            JOIN assignments ON assignments.id = grading_jobs.assignment_id\n            WHERE (\n                grading_jobs.status = 'queued'\n                OR (\n                    grading_jobs.status IN ('claimed', 'running')\n                    AND grading_jobs.lease_expires_at <= $4\n                    AND grading_jobs.attempts < grading_jobs.max_attempts\n                )\n            )\n              AND assignments.execution_config->>'backend' = ANY($2)\n              AND (\n                assignments.runner_config->>'environment' = ANY($3)\n                OR assignments.runner_config->>'image' = ANY($3)\n              )\n            ORDER BY grading_jobs.queued_at\n            FOR UPDATE SKIP LOCKED\n            LIMIT $5\n        )\n        UPDATE grading_jobs\n        SET status = 'claimed',\n            worker_id = $1,\n            attempts = attempts + 1,\n            claimed_at = $4,\n            started_at = NULL,\n            finished_at = NULL,\n            lease_expires_at = $6,\n            last_heartbeat_at = $4,\n            failure_reason = NULL,\n            failure_message = NULL,\n            failure_retryable = NULL\n        FROM candidate\n        WHERE grading_jobs.id = candidate.id\n        RETURNING\n            grading_jobs.id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray",
+        "TextArray",
+        "Timestamptz",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a983f1611d0071cd5091ec308fb31e9a881ac1a9154e111d61c0e3fe0d4f381d"
+}

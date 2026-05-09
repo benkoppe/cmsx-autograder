@@ -32,7 +32,7 @@ Control Plane / Big Brain
 Worker
   - long-running deployable service
   - connects to control plane
-  - advertises capabilities
+  - authenticates with a provisioned private key
   - claims jobs
   - prepares input/grader/output workspaces
   - invokes executor backend
@@ -133,7 +133,7 @@ Responsibilities include:
 - Submission metadata and file storage.
 - Job creation and queueing.
 - Worker authentication and heartbeats.
-- Worker capability tracking.
+- Worker provisioning and key management.
 - Event and log ingestion.
 - Result and artifact storage.
 - Job status APIs.
@@ -149,8 +149,7 @@ The worker is a long-running service deployed by the user or operator. The most 
 
 Responsibilities include:
 
-- Authenticate to the control plane using a scoped worker token.
-- Advertise available executor backends and runner environments.
+- Authenticate to the control plane using a provisioned private key.
 - Send heartbeats with capacity and version information.
 - Claim jobs from the control plane.
 - Download submission files and grader bundles.
@@ -162,7 +161,13 @@ Responsibilities include:
 - Upload final result and artifacts.
 - Clean up containers, processes, and temporary files.
 
-Worker tokens should be scoped. They should allow the worker to claim assigned jobs, fetch required job inputs, upload events, upload results, and heartbeat. They should not allow assignment mutation, token management, or unrestricted access to unrelated submissions.
+Workers should be provisioned by the control plane. Provisioning creates the internal worker ID, worker row, and an Ed25519 keypair; stores only the public key and fingerprint; and returns a worker config containing the control-plane URL plus a single-line base64-encoded private key. The worker does not need to know or configure its internal worker ID.
+
+Worker requests should be signed with short-lived Ed25519 JWTs. The JWT key ID should be the public-key fingerprint derived from the provisioned private key, allowing the control plane to resolve the internal worker ID from `worker_keys`. Worker authentication should bind the JWT to method, path, and request body hash, and replay should be rejected using per-worker JWT IDs.
+
+Worker credentials should be scoped by route behavior. They should allow the worker to claim assigned jobs, fetch required job inputs, upload events, upload results, and heartbeat. They should not allow assignment mutation, worker provisioning, key management, or unrestricted access to unrelated submissions.
+
+Each worker process should run exactly one configured executor backend. The executor is local worker configuration rather than scheduler state stored by the control plane. In the initial system, connected workers are assumed to be operationally compatible with jobs from the same deployment; heterogeneous worker scheduling can be added later if it becomes necessary.
 
 ## Executor Backends
 
@@ -262,7 +267,7 @@ Initial runner environments should include:
 
 For the Docker socket executor, runner environments should be packaged as Nix-built OCI images. Assignment configuration should reference pinned image digests where possible rather than floating tags.
 
-The runner environment should not contain assignment auth tokens, worker tokens, CMSX API tokens, database credentials, or other control-plane secrets.
+The runner environment should not contain assignment auth tokens, worker private keys, CMSX API tokens, database credentials, or other control-plane secrets.
 
 ## Nix Usage
 
@@ -583,18 +588,17 @@ Example heartbeat:
 
 ```json
 {
-  "worker_id": "worker_abc",
   "version": "0.1.0",
   "status": "online",
-  "executor_backends": ["docker-socket", "in-worker"],
-  "runner_images": ["python", "c-python"],
   "running_jobs": 2,
   "max_jobs": 4,
-  "last_seen": "2026-05-04T12:00:00Z"
+  "active_job_ids": ["0196a6d5-7f6b-7c72-9d19-c4c3dcbef410"]
 }
 ```
 
-The control plane should track worker online/offline state, version, executor backends, runner environments, current load, recent failures, capacity, and last heartbeat time.
+The control plane should track worker online/offline state, version, current load, recent failures, capacity, and last heartbeat time. Heartbeat responses should reconcile active leased jobs by returning renewed, cancelled, and unknown job IDs. The worker should treat that response as authoritative for cancellation and lease ownership.
+
+The control plane should not initially schedule based on advertised worker executor backends or runner environments. A worker is provisioned for a deployment and has one local executor configured by the operator. If heterogeneous workers become necessary later, backend and runner matching can be added without changing the job lease model.
 
 ## Cancellation
 
@@ -629,6 +633,8 @@ submission_files
 job_events
 workers
 worker_heartbeats
+worker_keys
+worker_request_nonces
 runner_environments
 artifacts
 ```
@@ -671,6 +677,7 @@ submission_files:
   problem_name
   cmsx_file_field_name
   original_filename
+  safe_filename
   storage_path
   content_sha256
   size_bytes
@@ -683,12 +690,17 @@ grading_jobs:
   worker_id
   status
   attempts
+  max_attempts
   queued_at
   claimed_at
   started_at
   finished_at
+  lease_expires_at
+  last_heartbeat_at
   cancel_requested_at
-  error_message
+  failure_reason
+  failure_message
+  failure_retryable
 
 grading_results:
   id
@@ -718,11 +730,32 @@ job_events:
 workers:
   id
   name
-  token_hash
   status
   version
   created_at
   last_seen_at
+
+worker_keys:
+  id
+  worker_id
+  public_key
+  public_key_fingerprint
+  created_at
+  revoked_at
+
+worker_request_nonces:
+  worker_id
+  jti
+  expires_at
+
+worker_heartbeats:
+  id
+  worker_id
+  status
+  version
+  running_jobs
+  max_jobs
+  reported_at
 
 artifacts:
   id
@@ -747,6 +780,8 @@ POST /cmsx/a/{assignment_slug}/submit
 POST /workers/heartbeat
 POST /workers/jobs/claim
 GET  /workers/jobs/{job_id}
+GET  /workers/jobs/{job_id}/files/{file_id}
+POST /workers/jobs/{job_id}/started
 POST /workers/jobs/{job_id}/events
 POST /workers/jobs/{job_id}/result
 POST /workers/jobs/{job_id}/artifacts

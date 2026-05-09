@@ -28,7 +28,6 @@ ON assignment_tokens(assignment_id);
 CREATE TABLE workers (
   id UUID PRIMARY KEY,
   name TEXT NOT NULL,
-  token_hash TEXT NOT NULL,
   status TEXT NOT NULL CHECK (
     status IN ('online', 'offline', 'disabled')
   ),
@@ -39,6 +38,32 @@ CREATE TABLE workers (
 
 CREATE UNIQUE INDEX idx_workers_name ON workers(name);
 
+CREATE TABLE worker_keys (
+  id UUID PRIMARY KEY,
+  worker_id UUID NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
+  public_key TEXT NOT NULL,
+  public_key_fingerprint TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  revoked_at TIMESTAMPTZ
+);
+
+CREATE INDEX idx_worker_keys_worker_id
+ON worker_keys(worker_id);
+
+CREATE UNIQUE INDEX idx_worker_keys_fingerprint_active
+ON worker_keys(public_key_fingerprint)
+WHERE revoked_at IS NULL;
+
+CREATE TABLE worker_request_nonces (
+  worker_id UUID NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
+  jti UUID NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (worker_id, jti)
+);
+
+CREATE INDEX idx_worker_request_nonces_expires_at
+ON worker_request_nonces(expires_at);
+
 CREATE TABLE worker_heartbeats (
   id UUID PRIMARY KEY,
   worker_id UUID NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
@@ -46,8 +71,6 @@ CREATE TABLE worker_heartbeats (
     status IN ('online', 'offline', 'disabled')
   ),
   version TEXT,
-  executor_backends JSONB NOT NULL,
-  runner_images JSONB NOT NULL,
   running_jobs INTEGER NOT NULL CHECK (running_jobs >= 0),
   max_jobs INTEGER NOT NULL CHECK (max_jobs >= 0),
   reported_at TIMESTAMPTZ NOT NULL
@@ -109,15 +132,20 @@ CREATE TABLE grading_jobs (
   assignment_id UUID NOT NULL REFERENCES assignments(id) ON DELETE RESTRICT,
   worker_id UUID REFERENCES workers(id) ON DELETE SET NULL,
   status TEXT NOT NULL CHECK (
-    status IN ('queued', 'running', 'succeeded', 'failed', 'error', 'cancelled')
+    status IN ('queued', 'claimed', 'running', 'succeeded', 'failed', 'error', 'cancelled')
   ),
   attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  max_attempts INTEGER NOT NULL DEFAULT 3 CHECK (max_attempts > 0),
   queued_at TIMESTAMPTZ NOT NULL,
   claimed_at TIMESTAMPTZ,
   started_at TIMESTAMPTZ,
   finished_at TIMESTAMPTZ,
+  lease_expires_at TIMESTAMPTZ,
+  last_heartbeat_at TIMESTAMPTZ,
   cancel_requested_at TIMESTAMPTZ,
-  error_message TEXT
+  failure_reason TEXT,
+  failure_message TEXT,
+  failure_retryable BOOLEAN
 );
 
 CREATE INDEX idx_grading_jobs_status_queued
@@ -131,6 +159,12 @@ ON grading_jobs(assignment_id);
 
 CREATE INDEX idx_grading_jobs_worker_id
 ON grading_jobs(worker_id);
+
+CREATE INDEX idx_grading_jobs_lease_expiry
+ON grading_jobs(status, lease_expires_at);
+
+CREATE INDEX idx_grading_jobs_worker_status
+ON grading_jobs(worker_id, status);
 
 CREATE TABLE grading_results (
   id UUID PRIMARY KEY,

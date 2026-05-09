@@ -28,6 +28,29 @@ pub fn router(state: AppState) -> Router {
             "/cmsx/a/{slug}/submit",
             post(routes::cmsx::submit).layer(DefaultBodyLimit::max(max_body_bytes)),
         )
+        .route("/workers/heartbeat", post(routes::workers::heartbeat))
+        .route("/workers/jobs/claim", post(routes::workers::claim_job))
+        .route("/workers/jobs/{job_id}", get(routes::workers::get_job))
+        .route(
+            "/workers/jobs/{job_id}/events",
+            post(routes::workers::post_events),
+        )
+        .route(
+            "/workers/jobs/{job_id}/result",
+            post(routes::workers::post_result),
+        )
+        .route(
+            "/workers/jobs/{job_id}/started",
+            post(routes::workers::post_started),
+        )
+        .route(
+            "/workers/jobs/{job_id}/failed",
+            post(routes::workers::post_failed),
+        )
+        .route(
+            "/workers/jobs/{job_id}/files/{file_id}",
+            get(routes::workers::get_job_file),
+        )
         .with_state(state)
         .layer(TraceLayer::new_for_http())
 }

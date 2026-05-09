@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO grading_results (\n            id,\n            job_id,\n            status,\n            score,\n            max_score,\n            feedback,\n            tests,\n            result,\n            stdout_summary,\n            stderr_summary,\n            duration_ms,\n            created_at\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Float8",
+        "Float8",
+        "Text",
+        "Jsonb",
+        "Jsonb",
+        "Text",
+        "Text",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1f3f8d30184dbad1076cee06dff70d7dfe45396039e3a31ba770edb22183db5d"
+}

@@ -1,5 +1,5 @@
 [package]
-name = "cmsx-control-plane"
+name = "cmsx-worker"
 version.workspace = true
 edition.workspace = true
 
@@ -7,28 +7,17 @@ edition.workspace = true
 cmsx-core = { path = "../cmsx-core" }
 
 anyhow.workspace = true
-axum.workspace = true
-bytes.workspace = true
 base64.workspace = true
+bytes.workspace = true
 chrono.workspace = true
 figment.workspace = true
 jwt-simple.workspace = true
-object_store.workspace = true
+hex.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sqlx.workspace = true
-sanitize-filename.workspace = true
+sha2.workspace = true
 tokio.workspace = true
-tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
-url.workspace = true
-argon2.workspace = true
-hex.workspace = true
-sha2.workspace = true
-
-[dev-dependencies]
-http-body-util.workspace = true
-tempfile.workspace = true
-tower.workspace = true

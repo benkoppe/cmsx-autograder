@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        DELETE FROM worker_request_nonces\n        WHERE expires_at <= $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5db33666d13c1eea470831256a78185a95b2f4bdf7241ac185cb77bb0541e0ce"
+}

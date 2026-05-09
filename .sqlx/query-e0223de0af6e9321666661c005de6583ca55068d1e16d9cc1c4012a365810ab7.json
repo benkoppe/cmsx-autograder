@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT worker_keys.public_key\n        FROM worker_keys\n        JOIN workers ON workers.id = worker_keys.worker_id\n        WHERE worker_keys.worker_id = $1\n          AND worker_keys.revoked_at IS NULL\n          AND workers.status != 'disabled'\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "public_key",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e0223de0af6e9321666661c005de6583ca55068d1e16d9cc1c4012a365810ab7"
+}

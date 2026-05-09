@@ -96,6 +96,20 @@ impl Storage {
         }
     }
 
+    pub async fn get(&self, key: &str) -> Result<Bytes> {
+        let bytes = self
+            .store
+            .as_ref()
+            .get(&Path::from(key))
+            .await
+            .context("failed to get stored object")?
+            .bytes()
+            .await
+            .context("failed to read stored object")?;
+
+        Ok(bytes)
+    }
+
     pub async fn delete(&self, key: &str) -> Result<()> {
         self.store
             .as_ref()
