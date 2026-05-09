@@ -143,6 +143,7 @@ CREATE TABLE grading_jobs (
   lease_expires_at TIMESTAMPTZ,
   last_heartbeat_at TIMESTAMPTZ,
   cancel_requested_at TIMESTAMPTZ,
+  cancel_expires_at TIMESTAMPTZ,
   failure_reason TEXT,
   failure_message TEXT,
   failure_retryable BOOLEAN
@@ -162,6 +163,10 @@ ON grading_jobs(worker_id);
 
 CREATE INDEX idx_grading_jobs_lease_expiry
 ON grading_jobs(status, lease_expires_at);
+
+CREATE INDEX idx_grading_jobs_cancel_expiry
+ON grading_jobs(status, cancel_expires_at)
+WHERE cancel_expires_at IS NOT NULL;
 
 CREATE INDEX idx_grading_jobs_worker_status
 ON grading_jobs(worker_id, status);

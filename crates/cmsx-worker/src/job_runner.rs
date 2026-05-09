@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use cmsx_core::{
     ClaimedJob, GradingResult, JobEventBatchRequest, JobEventPayload, JobFailureRequest,
-    JobResultRequest,
+    JobResultRequest, ResultStatus,
     protocol::{JOB_EVENT_MESSAGE_MAX_BYTES, cap_text, job_event_type},
 };
 
@@ -327,6 +327,15 @@ pub async fn run_job(
     Ok(())
 }
 
+#[derive(Debug)]
+enum ResultReportOutcome {
+    Accepted,
+    CancellationRequested,
+    OwnershipLost,
+    Rejected(String),
+    Failed,
+}
+
 impl JobLifecycle {
     async fn run_prepared_workspace(
         &mut self,
@@ -518,7 +527,7 @@ impl JobLifecycle {
 
                 match result {
                     Ok(result) => {
-                        self.post_result(result, Some(output.duration_ms), &output)
+                        self.report_result(result, Some(output.duration_ms), &output)
                             .await;
                     }
                     Err(error) => {
@@ -578,7 +587,7 @@ impl JobLifecycle {
         match error {
             MaterializeInputError::Cancelled => match self.current_reason().await {
                 CancellationReason::ControlPlaneCancelled => {
-                    self.post_result(GradingResult::cancelled(), None, &empty_output())
+                    self.report_result(GradingResult::cancelled(), None, &empty_output())
                         .await;
                 }
                 CancellationReason::LeaseLost => {
@@ -629,7 +638,7 @@ impl JobLifecycle {
 
         match self.current_reason().await {
             CancellationReason::ControlPlaneCancelled => {
-                self.post_result(GradingResult::cancelled(), None, &empty_output())
+                self.report_result(GradingResult::cancelled(), None, &empty_output())
                     .await;
                 true
             }
@@ -653,7 +662,7 @@ impl JobLifecycle {
     async fn handle_cancelled_before_executor(&mut self) {
         match self.current_reason().await {
             CancellationReason::ControlPlaneCancelled => {
-                self.post_result(GradingResult::cancelled(), None, &empty_output())
+                self.report_result(GradingResult::cancelled(), None, &empty_output())
                     .await;
             }
             CancellationReason::LeaseLost => {
@@ -674,7 +683,7 @@ impl JobLifecycle {
     async fn handle_post_started_404(&mut self) {
         match self.current_reason().await {
             CancellationReason::ControlPlaneCancelled => {
-                self.post_result(GradingResult::cancelled(), None, &empty_output())
+                self.report_result(GradingResult::cancelled(), None, &empty_output())
                     .await;
             }
             CancellationReason::LeaseLost => {
@@ -711,18 +720,45 @@ impl JobLifecycle {
         }
     }
 
-    async fn post_result(
+    async fn report_result(
         &mut self,
         result: GradingResult,
         duration_ms: Option<i64>,
         output: &ExecutionOutput,
     ) {
+        let is_cancelled_result = matches!(result.status, ResultStatus::Cancelled);
+
+        match self.report_result_once(result, duration_ms, output).await {
+            ResultReportOutcome::Accepted
+            | ResultReportOutcome::OwnershipLost
+            | ResultReportOutcome::Failed => {}
+            ResultReportOutcome::Rejected(message) => {
+                self.post_failed_after_rejected_result(message).await;
+            }
+            ResultReportOutcome::CancellationRequested if is_cancelled_result => {
+                tracing::warn!(
+                    job_id = %self.job.id,
+                    "cancelled result conflicted after cancellation was already requested"
+                );
+            }
+            ResultReportOutcome::CancellationRequested => {
+                self.report_cancelled_result_after_conflict(output).await;
+            }
+        }
+    }
+
+    async fn report_result_once(
+        &mut self,
+        result: GradingResult,
+        duration_ms: Option<i64>,
+        output: &ExecutionOutput,
+    ) -> ResultReportOutcome {
         if !should_post_terminal_for_reason(self.current_reason().await) {
             tracing::info!(
                 job_id = %self.job.id,
-                "skipping result post after lease loss"
+                "skipping result report after lease loss"
             );
-            return;
+            return ResultReportOutcome::OwnershipLost;
         }
 
         self.event_writer.flush().await;
@@ -737,25 +773,35 @@ impl JobLifecycle {
         match self.client.post_result(self.job.id, &request).await {
             Ok(()) => {
                 self.stop_network_lifecycle_after_terminal().await;
+                ResultReportOutcome::Accepted
             }
             Err(error) if error.is_status(StatusCode::BAD_REQUEST) => {
-                let message = rejected_result_message(&error);
-                self.post_failed_after_rejected_result(message).await;
+                ResultReportOutcome::Rejected(rejected_result_message(&error))
+            }
+            Err(error) if error.is_status(StatusCode::CONFLICT) => {
+                tracing::info!(
+                    job_id = %self.job.id,
+                    ?error,
+                    "result report conflicted with control-plane cancellation"
+                );
+                ResultReportOutcome::CancellationRequested
             }
             Err(error) if error.is_status(StatusCode::NOT_FOUND) => {
                 tracing::info!(
                     job_id = %self.job.id,
                     ?error,
-                    "post_result returned 404; ownership lost"
+                    "result report returned 404; ownership lost"
                 );
                 self.stop_network_lifecycle_after_terminal().await;
+                ResultReportOutcome::OwnershipLost
             }
             Err(error) => {
                 tracing::warn!(
                     job_id = %self.job.id,
                     ?error,
-                    "post_result failed"
+                    "result report failed"
                 );
+                ResultReportOutcome::Failed
             }
         }
     }
@@ -773,11 +819,21 @@ impl JobLifecycle {
             Ok(()) => {
                 self.stop_network_lifecycle_after_terminal().await;
             }
+            Err(error) if error.is_status(StatusCode::CONFLICT) => {
+                tracing::info!(
+                    job_id = %self.job.id,
+                    ?error,
+                    "result-invalid failure report conflicted with control-plane cancellation"
+                );
+
+                let output = empty_output();
+                self.report_cancelled_result_after_conflict(&output).await;
+            }
             Err(error) if error.is_status(StatusCode::NOT_FOUND) => {
                 tracing::info!(
                     job_id = %self.job.id,
                     ?error,
-                    "post_failed result_invalid after rejected result returned 404; ownership lost"
+                    "result-invalid failure report returned 404; ownership lost"
                 );
                 self.stop_network_lifecycle_after_terminal().await;
             }
@@ -785,7 +841,7 @@ impl JobLifecycle {
                 tracing::warn!(
                     job_id = %self.job.id,
                     ?error,
-                    "post_failed result_invalid after rejected result failed"
+                    "result-invalid failure report failed"
                 );
             }
         }
@@ -798,7 +854,7 @@ impl JobLifecycle {
             tracing::info!(
                 job_id = %self.job.id,
                 reason,
-                "skipping failure post after lease loss"
+                "skipping failure report after lease loss"
             );
             return;
         }
@@ -815,11 +871,20 @@ impl JobLifecycle {
             Ok(()) => {
                 self.stop_network_lifecycle_after_terminal().await;
             }
+            Err(error) if error.is_status(StatusCode::CONFLICT) => {
+                tracing::info!(
+                    job_id = %self.job.id,
+                    ?error,
+                    "failure report conflicted with control-plane cancellation"
+                );
+                let output = empty_output();
+                self.report_cancelled_result_after_conflict(&output).await;
+            }
             Err(error) if error.is_status(StatusCode::NOT_FOUND) => {
                 tracing::info!(
                     job_id = %self.job.id,
                     ?error,
-                    "post_failed returned 404; ownership lost"
+                    "failure report returned 404; ownership lost"
                 );
                 self.stop_network_lifecycle_after_terminal().await;
             }
@@ -827,18 +892,54 @@ impl JobLifecycle {
                 tracing::warn!(
                     job_id = %self.job.id,
                     ?error,
-                    "post_failed failed"
+                    "failure report failed"
+                );
+            }
+        }
+    }
+
+    async fn report_cancelled_result_after_conflict(&mut self, output: &ExecutionOutput) {
+        self.mark_cancellation(CancellationReason::ControlPlaneCancelled)
+            .await;
+        self.cancel.cancel();
+
+        tracing::info!(
+            job_id = %self.job.id,
+            "terminal report conflicted with cancellation; reporting cancelled result"
+        );
+
+        self.report_cancelled_result(output).await;
+    }
+
+    async fn report_cancelled_result(&mut self, output: &ExecutionOutput) {
+        self.post_event(job_event_type::JOB_CANCELLED, "Job cancelled", json!({}))
+            .await;
+
+        match self
+            .report_result_once(GradingResult::cancelled(), Some(output.duration_ms), output)
+            .await
+        {
+            ResultReportOutcome::Accepted
+            | ResultReportOutcome::OwnershipLost
+            | ResultReportOutcome::Failed => {}
+            ResultReportOutcome::CancellationRequested => {
+                tracing::warn!(
+                    job_id = %self.job.id,
+                    "cancelled result conflicted after cancellation was already requested"
+                );
+            }
+            ResultReportOutcome::Rejected(message) => {
+                tracing::warn!(
+                    job_id = %self.job.id,
+                    message,
+                    "cancelled result was rejected by control plane"
                 );
             }
         }
     }
 
     async fn post_control_plane_cancelled_result(&mut self, output: &ExecutionOutput) {
-        self.post_event(job_event_type::JOB_CANCELLED, "Job cancelled", json!({}))
-            .await;
-
-        self.post_result(GradingResult::cancelled(), Some(output.duration_ms), output)
-            .await;
+        self.report_cancelled_result(output).await;
     }
 
     async fn post_event(&mut self, event_type: &str, message: &str, data: serde_json::Value) {

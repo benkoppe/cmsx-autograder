@@ -16,8 +16,8 @@ use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
 use cmsx_core::{
-    ClaimJobRequest, ClaimJobResponse, ClaimedJob, ClaimedJobFile, GradingResult,
-    JobEventBatchRequest, JobFailureRequest, JobResultRequest, StartedJobRequest, WorkerAuthClaims,
+    ClaimJobRequest, ClaimJobResponse, ClaimedJob, ClaimedJobFile, JobEventBatchRequest,
+    JobFailureRequest, JobResultRequest, StartedJobRequest, WorkerAuthClaims,
     WorkerHeartbeatRequest, WorkerHeartbeatResponse,
     protocol::{
         GRADING_RESULT_SCHEMA_VERSION, JOB_EVENT_BATCH_MAX_EVENTS, JOB_EVENT_MESSAGE_MAX_BYTES,
@@ -25,7 +25,7 @@ use cmsx_core::{
     },
 };
 
-use crate::{app::AppState, db, error::ApiError};
+use crate::{app::AppState, db, error::ApiError, job_maintenance::sweep_expired_jobs_in_tx};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -377,7 +377,6 @@ async fn reconcile_active_jobs(
             .execute(&mut **tx)
             .await
             .map_err(ApiError::internal)?;
-
             cancelled_job_ids.push(*job_id);
             continue;
         }
@@ -442,7 +441,7 @@ async fn claim_available_jobs(
     let now = Utc::now();
     let mut tx = state.db.begin().await.map_err(ApiError::internal)?;
 
-    mark_exhausted_expired_jobs(&mut tx, now).await?;
+    sweep_expired_jobs_in_tx(&mut tx, now).await?;
 
     let rows = sqlx::query!(
         r#"
@@ -499,100 +498,6 @@ async fn claim_available_jobs(
 
     tx.commit().await.map_err(ApiError::internal)?;
     Ok(jobs)
-}
-
-async fn mark_exhausted_expired_jobs(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    now: chrono::DateTime<Utc>,
-) -> Result<(), ApiError> {
-    let cancelled_rows = sqlx::query!(
-        r#"
-        UPDATE grading_jobs
-        SET status = 'cancelled',
-            finished_at = $1,
-            lease_expires_at = NULL
-        WHERE status IN ('claimed', 'running')
-          AND lease_expires_at <= $1
-          AND cancel_requested_at IS NOT NULL
-        RETURNING id
-        "#,
-        now
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(ApiError::internal)?;
-
-    for row in cancelled_rows {
-        insert_cancelled_result(tx, row.id, now).await?;
-    }
-
-    sqlx::query!(
-        r#"
-        UPDATE grading_jobs
-        SET status = 'error',
-            finished_at = $1,
-            lease_expires_at = NULL,
-            failure_reason = 'lease_expired',
-            failure_message = 'job lease expired and max attempts were exhausted',
-            failure_retryable = false
-        WHERE status IN ('claimed', 'running')
-          AND lease_expires_at <= $1
-          AND attempts >= max_attempts
-        "#,
-        now
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(ApiError::internal)?;
-
-    Ok(())
-}
-
-async fn insert_cancelled_result(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    job_id: Uuid,
-    now: chrono::DateTime<Utc>,
-) -> Result<(), ApiError> {
-    let result = GradingResult::cancelled();
-    let result_json = serde_json::to_value(&result).map_err(ApiError::internal)?;
-    let tests_json = serde_json::to_value(&result.tests).map_err(ApiError::internal)?;
-    let result_status = result.status.as_str();
-    let feedback = result.feedback.clone();
-
-    sqlx::query!(
-        r#"
-        INSERT INTO grading_results (
-            id,
-            job_id,
-            status,
-            score,
-            max_score,
-            feedback,
-            tests,
-            result,
-            stdout_summary,
-            stderr_summary,
-            duration_ms,
-            created_at
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, 0, $9)
-        ON CONFLICT (job_id) DO NOTHING
-        "#,
-        Uuid::now_v7(),
-        job_id,
-        result_status,
-        result.score,
-        result.max_score,
-        feedback,
-        SqlxJson(tests_json) as _,
-        SqlxJson(result_json) as _,
-        now,
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(ApiError::internal)?;
-
-    Ok(())
 }
 
 async fn load_claimed_job_in_tx(

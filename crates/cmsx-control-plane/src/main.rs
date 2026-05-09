@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod db;
 mod error;
+mod job_maintenance;
 mod routes;
 mod storage;
 mod workers;
@@ -24,6 +25,8 @@ async fn serve() -> anyhow::Result<()> {
     let config = config::Config::load()?;
     let db = db::connect(&config.database_url).await?;
     let storage = storage::Storage::from_config(&config.storage)?;
+
+    job_maintenance::spawn_job_sweeper(db.clone());
 
     let state = app::AppState {
         db,
