@@ -302,7 +302,7 @@ It is a compatibility concern because student build systems and language tooling
 
 The system should provide curated runner environments first. Some can be more pure Nix-style, and others can be explicitly FHS-compatible for assignments that need conventional Linux paths.
 
-Assignment configuration should make FHS compatibility explicit:
+Runner environment definitions should make FHS compatibility explicit. In the initial Docker socket executor, the worker owns the default runner image and resource policy; assignment configuration can override those defaults when an assignment genuinely needs a different environment.
 
 ```toml
 [runner]
@@ -391,7 +391,11 @@ The SDK should provide:
 
 ## Assignment Configuration
 
-Assignments should define their local webhook identity, execution requirements, runner environment, resource limits, capabilities, and grading bundle. They should not require a configured CMSX assignment ID; CMSX's submitted `assignment_id` is stored per submission as request metadata. The assignment slug plus a valid assignment auth token binds an incoming CMSX request to a local assignment.
+Assignments should define their local webhook identity, grading bundle, auth tokens, and any assignment-specific overrides. They should not be required to repeat deployment-level executor details such as the default Docker image, default memory limit, default CPU limit, PID limit, network policy, or read-only root policy. Those defaults belong to worker configuration because they are operational policy and may vary by worker deployment.
+
+Assignments should not require a configured CMSX assignment ID; CMSX's submitted `assignment_id` is stored per submission as request metadata. The assignment slug plus a valid assignment auth token binds an incoming CMSX request to a local assignment.
+
+For the common Python runner path, assignment `execution_config` and `runner_config` can be empty. Assignment-level config should be treated as optional overrides for exceptional cases, such as a longer timeout, extra memory, network access, or a custom runner image.
 
 Example:
 
@@ -401,7 +405,6 @@ name = "C Basics"
 max_score = 100
 
 [execution]
-backend = "docker-socket"
 timeout_seconds = 30
 memory_mb = 512
 cpus = 1
@@ -426,6 +429,44 @@ network = false
 ```
 
 Assignment auth tokens are the CMSX webhook authentication mechanism and should be stored hashed, not in plaintext.
+
+The preferred minimal assignment configuration should look closer to:
+
+```toml
+slug = "python-intro"
+name = "Python Intro"
+max_score = 100
+
+[execution]
+# Empty means use worker defaults.
+
+[runner]
+# Empty means use worker default runner image.
+
+[capabilities]
+read_files = true
+run_commands = false
+execute_student_code = false
+network = false
+```
+
+Worker configuration should define the default Docker executor policy, for example:
+
+```toml
+[executor]
+backend = "docker-socket"
+workspace_root = "/srv/cmsx-worker/jobs"
+grader_root = "/srv/cmsx-worker/assignments"
+max_jobs = 2
+keep_workspaces = false
+docker_host = "unix:///var/run/docker.sock"
+default_image = "cmsx-runner-python:latest"
+default_timeout_seconds = 60
+default_memory_mb = 512
+default_cpus = 1
+default_pids_limit = 128
+default_network = false
+```
 
 ## Capability Model
 

@@ -1,0 +1,413 @@
+#![cfg(unix)]
+
+mod common;
+
+use bollard::Docker;
+use indoc::indoc;
+use serde_json::json;
+use tokio_util::sync::CancellationToken;
+
+use cmsx_core::ResultStatus;
+use cmsx_worker::{
+    config::DockerSocketExecutorConfig,
+    executor::{DockerSocketExecutor, ExecutionStatus, docker_socket::container_name},
+};
+
+use common::ExecutorFixture;
+
+fn test_docker_host() -> Option<String> {
+    std::env::var("CMSX_DOCKER_TEST_HOST")
+        .ok()
+        .or_else(|| std::env::var("DOCKER_HOST").ok())
+}
+
+fn connect_test_docker() -> Docker {
+    if let Some(docker_host) = test_docker_host() {
+        Docker::connect_with_host(&docker_host)
+            .unwrap_or_else(|error| panic!("failed to connect to Docker at {docker_host}: {error}"))
+    } else {
+        Docker::connect_with_defaults()
+            .expect("failed to connect to Docker; set CMSX_DOCKER_TEST_HOST or DOCKER_HOST")
+    }
+}
+
+fn docker_config(fixture: &ExecutorFixture) -> DockerSocketExecutorConfig {
+    DockerSocketExecutorConfig {
+        workspace_root: fixture.workspace.root.clone(),
+        grader_root: fixture.workspace.grader_dir.clone(),
+        max_jobs: Some(1),
+        keep_workspaces: false,
+        docker_host: test_docker_host(),
+        default_image: std::env::var("CMSX_DOCKER_TEST_IMAGE")
+            .unwrap_or_else(|_| "cmsx-runner-python:latest".to_string()),
+        default_timeout_seconds: Some(60),
+        default_memory_mb: Some(512),
+        default_cpus: Some(1.0),
+        default_pids_limit: Some(128),
+        default_network: Some(false),
+    }
+}
+
+async fn require_runner_image(image: &str) {
+    let docker = connect_test_docker();
+
+    docker.inspect_image(image).await.unwrap_or_else(|error| {
+        panic!(
+            "Docker test image {image:?} is not available: {error:?}\n\
+             Build/load it first with: nix run .#load-cmsx-runner-python\n\
+             Or set CMSX_DOCKER_TEST_IMAGE to another image."
+        )
+    });
+}
+
+fn executor(fixture: &ExecutorFixture) -> DockerSocketExecutor {
+    let config = docker_config(fixture);
+    DockerSocketExecutor::new(&config).expect("failed to create Docker executor")
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon and cmsx-runner-python:latest image"]
+async fn successful_grader_writes_result_json() {
+    let fixture = ExecutorFixture::new("docker-socket-");
+    require_runner_image(&docker_config(&fixture).default_image).await;
+
+    fixture.write_metadata(json!({}));
+    fixture.write_grade_py(indoc! {r#"
+        from cmsx_autograder import Result
+        def main(submission):
+            result = Result(max_score=10)
+            result.check("always passes", True, points=10)
+            return result
+    "#});
+
+    let output = executor(&fixture)
+        .run(
+            &fixture.job(json!({})),
+            &fixture.workspace,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("executor failed");
+
+    assert!(matches!(
+        output.status,
+        ExecutionStatus::Exited { code: Some(0) }
+    ));
+
+    let result = fixture.read_result().await;
+
+    assert!(matches!(result.status, ResultStatus::Passed));
+    assert_eq!(result.score, 10.0);
+    assert_eq!(result.max_score, 10.0);
+    assert_eq!(result.tests.len(), 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon and cmsx-runner-python:latest image"]
+async fn executor_sets_expected_environment_and_cwd() {
+    let fixture = ExecutorFixture::new("docker-socket-");
+    require_runner_image(&docker_config(&fixture).default_image).await;
+
+    fixture.write_metadata(json!({}));
+    fixture.write_grade_py(indoc! {r#"
+        import os
+        from pathlib import Path
+        from cmsx_autograder import Result
+        def main(submission):
+            result = Result(max_score=4)
+            input_dir = Path(os.environ["CMSX_INPUT_DIR"]).resolve()
+            work_dir = Path(os.environ["CMSX_WORK_DIR"]).resolve()
+            output_dir = Path(os.environ["CMSX_OUTPUT_DIR"]).resolve()
+            result.check("input env", input_dir == submission.input_dir.resolve(), points=1)
+            result.check("work env", work_dir == submission.work_dir.resolve(), points=1)
+            result.check("output env", output_dir == submission.output_dir.resolve(), points=1)
+            result.check("cwd is work dir", Path.cwd().resolve() == work_dir, points=1)
+            return result
+    "#});
+
+    let output = executor(&fixture)
+        .run(
+            &fixture.job(json!({})),
+            &fixture.workspace,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("executor failed");
+
+    assert!(matches!(
+        output.status,
+        ExecutionStatus::Exited { code: Some(0) }
+    ));
+
+    let result = fixture.read_result().await;
+
+    assert!(matches!(result.status, ResultStatus::Passed));
+    assert_eq!(result.score, 4.0);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon and cmsx-runner-python:latest image"]
+async fn grader_can_read_submission_files_and_metadata() {
+    let fixture = ExecutorFixture::new("docker-socket-");
+    require_runner_image(&docker_config(&fixture).default_image).await;
+
+    fixture.write_metadata(json!({
+        "job_id": "00000000-0000-0000-0000-000000000001",
+        "submission_id": "00000000-0000-0000-0000-000000000002",
+        "assignment_id": "00000000-0000-0000-0000-000000000003",
+        "assignment_slug": "intro",
+        "attempt": 1,
+        "received": {
+            "cmsx_group_id": "group-1"
+        },
+        "files": [
+            {
+                "id": "00000000-0000-0000-0000-000000000004",
+                "problem_name": "hello",
+                "original_filename": "hello.py",
+                "safe_filename": "hello.py",
+                "sha256": "unused",
+                "size_bytes": 11
+            }
+        ]
+    }));
+    fixture.write_input_file("hello.py", "print('hi')");
+
+    fixture.write_grade_py(indoc! {r#"
+        from cmsx_autograder import Result
+        def main(submission):
+            result = Result(max_score=3)
+            result.check("metadata group", submission.metadata["received"]["cmsx_group_id"] == "group-1", points=1)
+            result.check("file exists", (submission.files_dir / "hello.py").exists(), points=1)
+            result.check("file contents", (submission.files_dir / "hello.py").read_text() == "print('hi')", points=1)
+            return result
+    "#});
+
+    let output = executor(&fixture)
+        .run(
+            &fixture.job(json!({})),
+            &fixture.workspace,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("executor failed");
+
+    assert!(matches!(
+        output.status,
+        ExecutionStatus::Exited { code: Some(0) }
+    ));
+
+    let result = fixture.read_result().await;
+
+    assert!(matches!(result.status, ResultStatus::Passed));
+    assert_eq!(result.score, 3.0);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon and cmsx-runner-python:latest image"]
+async fn timeout_kills_container() {
+    let fixture = ExecutorFixture::new("docker-socket-");
+    require_runner_image(&docker_config(&fixture).default_image).await;
+
+    fixture.write_metadata(json!({}));
+    fixture.write_grade_py(indoc! {r#"
+        import time
+        from cmsx_autograder import Result
+        def main(submission):
+            time.sleep(30)
+            return Result(max_score=1)
+    "#});
+
+    let output = executor(&fixture)
+        .run(
+            &fixture.job(json!({ "timeout_seconds": 1 })),
+            &fixture.workspace,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("executor failed");
+
+    assert_eq!(output.status, ExecutionStatus::TimedOut);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon and cmsx-runner-python:latest image"]
+async fn container_is_removed_after_completion() {
+    let fixture = ExecutorFixture::new("docker-socket-");
+    require_runner_image(&docker_config(&fixture).default_image).await;
+
+    fixture.write_metadata(json!({}));
+    fixture.write_grade_py(indoc! {r#"
+        from cmsx_autograder import Result
+        def main(submission):
+            return Result(max_score=1)
+    "#});
+
+    let job = fixture.job(json!({}));
+    let name = container_name(&job);
+
+    let output = executor(&fixture)
+        .run(&job, &fixture.workspace, CancellationToken::new())
+        .await
+        .expect("executor failed");
+
+    assert!(matches!(
+        output.status,
+        ExecutionStatus::Exited { code: Some(0) }
+    ));
+
+    let docker = connect_test_docker();
+
+    let inspect = docker
+        .inspect_container(
+            &name,
+            None::<bollard::query_parameters::InspectContainerOptions>,
+        )
+        .await;
+
+    assert!(
+        inspect.is_err(),
+        "container {name} should have been removed after execution"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon and cmsx-runner-python:latest image"]
+async fn read_only_root_blocks_root_writes_but_tmp_and_workspace_are_writable() {
+    let fixture = ExecutorFixture::new("docker-socket-");
+    require_runner_image(&docker_config(&fixture).default_image).await;
+
+    fixture.write_metadata(json!({}));
+    fixture.write_grade_py(indoc! {r#"
+        from pathlib import Path
+        from cmsx_autograder import Result
+        def main(submission):
+            result = Result(max_score=5)
+            try:
+                Path("/should-not-write").write_text("nope")
+                root_write_blocked = False
+            except Exception:
+                root_write_blocked = True
+            tmp_writable = False
+            work_writable = False
+            output_writable = False
+            try:
+                Path("/tmp/can-write").write_text("ok")
+                tmp_writable = Path("/tmp/can-write").read_text() == "ok"
+            except Exception:
+                tmp_writable = False
+            try:
+                Path("/work/can-write").write_text("ok")
+                work_writable = Path("/work/can-write").read_text() == "ok"
+            except Exception:
+                work_writable = False
+            try:
+                Path("/output/can-write").write_text("ok")
+                output_writable = Path("/output/can-write").read_text() == "ok"
+            except Exception:
+                output_writable = False
+            result.check("root write blocked", root_write_blocked, points=1)
+            result.check("tmp writable", tmp_writable, points=1)
+            result.check("work writable", work_writable, points=1)
+            result.check("output writable", output_writable, points=1)
+            result.check("home is tmp", Path.home().resolve() == Path("/tmp").resolve(), points=1)
+            return result
+    "#});
+
+    let output = executor(&fixture)
+        .run(
+            &fixture.job(json!({})),
+            &fixture.workspace,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("executor failed");
+
+    assert!(matches!(
+        output.status,
+        ExecutionStatus::Exited { code: Some(0) }
+    ));
+
+    let result = fixture.read_result().await;
+
+    assert!(matches!(result.status, ResultStatus::Passed));
+    assert_eq!(result.score, 5.0);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon and cmsx-runner-python:latest image"]
+async fn runner_uses_fixed_non_root_user() {
+    let fixture = ExecutorFixture::new("docker-socket-");
+    require_runner_image(&docker_config(&fixture).default_image).await;
+
+    fixture.write_metadata(json!({}));
+    fixture.write_grade_py(indoc! {r#"
+        import os
+        from cmsx_autograder import Result
+        def main(submission):
+            result = Result(max_score=2)
+            result.check("uid", os.getuid() == 10001, points=1)
+            result.check("gid", os.getgid() == 10001, points=1)
+            return result
+    "#});
+
+    let output = executor(&fixture)
+        .run(
+            &fixture.job(json!({})),
+            &fixture.workspace,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("executor failed");
+
+    assert!(matches!(
+        output.status,
+        ExecutionStatus::Exited { code: Some(0) }
+    ));
+
+    let result = fixture.read_result().await;
+
+    assert!(matches!(result.status, ResultStatus::Passed));
+    assert_eq!(result.score, 2.0);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon and cmsx-runner-python:latest image"]
+async fn network_is_disabled_by_default() {
+    let fixture = ExecutorFixture::new("docker-socket-");
+    require_runner_image(&docker_config(&fixture).default_image).await;
+
+    fixture.write_metadata(json!({}));
+    fixture.write_grade_py(indoc! {r#"
+        import socket
+        from cmsx_autograder import Result
+        def main(submission):
+            result = Result(max_score=1)
+            try:
+                socket.create_connection(("example.com", 80), timeout=2)
+                network_blocked = False
+            except Exception:
+                network_blocked = True
+            result.check("network blocked", network_blocked, points=1)
+            return result
+    "#});
+
+    let output = executor(&fixture)
+        .run(
+            &fixture.job(json!({})),
+            &fixture.workspace,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("executor failed");
+
+    assert!(matches!(
+        output.status,
+        ExecutionStatus::Exited { code: Some(0) }
+    ));
+
+    let result = fixture.read_result().await;
+
+    assert!(matches!(result.status, ResultStatus::Passed));
+    assert_eq!(result.score, 1.0);
+}

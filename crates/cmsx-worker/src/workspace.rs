@@ -189,9 +189,33 @@ pub async fn prepare_attempt_workspace(
     tokio_fs::create_dir_all(&workspace.work_dir).await?;
     tokio_fs::create_dir_all(&workspace.artifacts_dir).await?;
 
+    set_runtime_workspace_permissions(&workspace)?;
+
     write_metadata(job, &workspace).await?;
 
     Ok(workspace)
+}
+
+pub fn set_runtime_workspace_permissions(workspace: &JobWorkspace) -> Result<(), WorkspaceError> {
+    set_writable_runtime_permissions(&workspace.work_dir)?;
+    set_writable_runtime_permissions(&workspace.output_dir)?;
+    set_writable_runtime_permissions(&workspace.artifacts_dir)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_writable_runtime_permissions(path: &Path) -> Result<(), WorkspaceError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(0o777);
+    fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_writable_runtime_permissions(_path: &Path) -> Result<(), WorkspaceError> {
+    Ok(())
 }
 
 pub async fn cleanup_attempt_workspace(workspace: &JobWorkspace) -> Result<(), WorkspaceError> {

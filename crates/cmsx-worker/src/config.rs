@@ -28,6 +28,14 @@ pub struct DockerSocketExecutorConfig {
     pub grader_root: PathBuf,
     pub max_jobs: Option<usize>,
     pub keep_workspaces: bool,
+    pub docker_host: Option<String>,
+
+    pub default_image: String,
+    pub default_timeout_seconds: Option<u64>,
+    pub default_memory_mb: Option<i64>,
+    pub default_cpus: Option<f64>,
+    pub default_pids_limit: Option<i64>,
+    pub default_network: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,8 +130,33 @@ impl ExecutorConfig {
             bail!("executor.grader_root must be set");
         }
         match self {
-            Self::DockerSocket(_) => {}
+            Self::DockerSocket(config) => config.validate()?,
             Self::InWorker(config) => config.validate()?,
+        }
+
+        Ok(())
+    }
+}
+
+impl DockerSocketExecutorConfig {
+    fn validate(&self) -> Result<()> {
+        if matches!(self.docker_host.as_deref(), Some(host) if host.trim().is_empty()) {
+            bail!("executor.docker_host must not be empty when set");
+        }
+        if self.default_image.trim().is_empty() {
+            bail!("executor.default_image must not be empty");
+        }
+        if matches!(self.default_timeout_seconds, Some(0)) {
+            bail!("executor.default_timeout_seconds must be positive");
+        }
+        if matches!(self.default_memory_mb, Some(memory_mb) if memory_mb <= 0) {
+            bail!("executor.default_memory_mb must be positive");
+        }
+        if matches!(self.default_cpus, Some(cpus) if !cpus.is_finite() || cpus <= 0.0) {
+            bail!("executor.default_cpus must be a positive finite number");
+        }
+        if matches!(self.default_pids_limit, Some(pids_limit) if pids_limit <= 0) {
+            bail!("executor.default_pids_limit must be positive");
         }
 
         Ok(())

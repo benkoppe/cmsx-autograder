@@ -1,4 +1,6 @@
+pub mod docker_socket;
 pub mod in_worker;
+pub mod utils;
 
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
@@ -7,10 +9,12 @@ use cmsx_core::ClaimedJob;
 
 use crate::workspace::JobWorkspace;
 
+pub use docker_socket::DockerSocketExecutor;
 pub use in_worker::InWorkerExecutor;
 
 #[derive(Clone)]
 pub enum Executor {
+    DockerSocket(Box<DockerSocketExecutor>),
     InWorker(InWorkerExecutor),
 }
 
@@ -37,7 +41,15 @@ impl Executor {
         cancel: CancellationToken,
     ) -> Result<ExecutionOutput> {
         match self {
+            Self::DockerSocket(executor) => executor.run(job, workspace, cancel).await,
             Self::InWorker(executor) => executor.run(job, workspace, cancel).await,
+        }
+    }
+
+    pub fn backend_name(&self) -> &'static str {
+        match self {
+            Self::DockerSocket(_) => "docker-socket",
+            Self::InWorker(_) => "in-worker",
         }
     }
 }

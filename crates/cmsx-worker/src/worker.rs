@@ -19,7 +19,7 @@ use crate::{
     capacity,
     client::ControlPlaneClient,
     config::{ExecutorConfig, WorkerConfig},
-    executor::{Executor, InWorkerExecutor},
+    executor::{DockerSocketExecutor, Executor, InWorkerExecutor},
     job_runner,
 };
 
@@ -61,7 +61,7 @@ pub async fn run(config: WorkerConfig) -> Result<()> {
 
     let signer = WorkerSigner::from_base64_pem(&config.private_key_base64)?;
     let client = ControlPlaneClient::new(config.control_plane_url.clone(), signer);
-    let executor = executor_from_config(&config.executor);
+    let executor = executor_from_config(&config.executor)?;
 
     tokio::spawn(heartbeat_loop(
         config.clone(),
@@ -83,22 +83,12 @@ pub async fn run(config: WorkerConfig) -> Result<()> {
     .await
 }
 
-fn executor_from_config(config: &ExecutorConfig) -> Executor {
+fn executor_from_config(config: &ExecutorConfig) -> Result<Executor> {
     match config {
-        ExecutorConfig::InWorker(config) => Executor::InWorker(InWorkerExecutor::new(config)),
-        ExecutorConfig::DockerSocket(_) => {
-            tracing::warn!(
-                "docker-socket executor is not implemented; using in-worker executor config defaults"
-            );
-            let fallback = crate::config::InWorkerExecutorConfig {
-                workspace_root: config.workspace_root().to_path_buf(),
-                grader_root: config.grader_root().to_path_buf(),
-                max_jobs: config.max_jobs(),
-                keep_workspaces: config.keep_workspaces(),
-                python_command: Some("python3".to_string()),
-            };
-            executor_from_config(&ExecutorConfig::InWorker(fallback))
-        }
+        ExecutorConfig::DockerSocket(config) => Ok(Executor::DockerSocket(Box::new(
+            DockerSocketExecutor::new(config)?,
+        ))),
+        ExecutorConfig::InWorker(config) => Ok(Executor::InWorker(InWorkerExecutor::new(config))),
     }
 }
 

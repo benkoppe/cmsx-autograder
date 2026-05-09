@@ -1,7 +1,6 @@
 use std::{process::Stdio, time::Instant};
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::Command,
@@ -14,23 +13,16 @@ use cmsx_core::ClaimedJob;
 
 use crate::{
     config::InWorkerExecutorConfig,
-    executor::{ExecutionOutput, ExecutionStatus},
+    executor::{
+        ExecutionOutput, ExecutionStatus,
+        utils::{SUMMARY_MAX_BYTES, bytes_to_bounded_summary, parse_timeout_seconds},
+    },
     workspace::JobWorkspace,
 };
-
-pub const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
-pub const MAX_TIMEOUT_SECONDS: u64 = 60 * 60;
-pub const SUMMARY_MAX_BYTES: usize = 64 * 1024;
-pub const TRUNCATION_MARKER: &str = "\n...[truncated]";
 
 #[derive(Clone)]
 pub struct InWorkerExecutor {
     python_command: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ExecutionConfig {
-    timeout_seconds: Option<u64>,
 }
 
 impl InWorkerExecutor {
@@ -95,17 +87,6 @@ impl InWorkerExecutor {
     }
 }
 
-pub fn parse_timeout_seconds(value: &serde_json::Value) -> u64 {
-    let Ok(config) = serde_json::from_value::<ExecutionConfig>(value.clone()) else {
-        return DEFAULT_TIMEOUT_SECONDS;
-    };
-
-    match config.timeout_seconds {
-        None | Some(0) => DEFAULT_TIMEOUT_SECONDS,
-        Some(value) => value.min(MAX_TIMEOUT_SECONDS),
-    }
-}
-
 async fn kill_and_reap(child: &mut tokio::process::Child) {
     if let Err(error) = child.kill().await {
         tracing::warn!(?error, "failed to kill child process");
@@ -164,41 +145,6 @@ where
     }
 
     Some(bytes_to_bounded_summary(retained, truncated))
-}
-
-pub fn bytes_to_bounded_summary(mut bytes: Vec<u8>, truncated: bool) -> String {
-    if truncated {
-        let marker = TRUNCATION_MARKER.as_bytes();
-        let reserved = marker.len().min(SUMMARY_MAX_BYTES);
-
-        if bytes.len() > SUMMARY_MAX_BYTES.saturating_sub(reserved) {
-            bytes.truncate(SUMMARY_MAX_BYTES.saturating_sub(reserved));
-        }
-
-        bytes.extend_from_slice(marker);
-    }
-
-    let summary = String::from_utf8_lossy(&bytes).into_owned();
-    cap_summary_string(summary, truncated)
-}
-
-pub fn cap_summary_string(mut value: String, truncated: bool) -> String {
-    if value.len() <= SUMMARY_MAX_BYTES {
-        return value;
-    }
-
-    let marker = if truncated { TRUNCATION_MARKER } else { "" };
-    let marker_len = marker.len();
-    let max_prefix = SUMMARY_MAX_BYTES.saturating_sub(marker_len);
-
-    let mut end = max_prefix;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-
-    value.truncate(end);
-    value.push_str(marker);
-    value
 }
 
 #[cfg(test)]
@@ -270,58 +216,6 @@ mod tests {
     #[cfg(unix)]
     fn script_path(temp: &TempDir, name: &str) -> PathBuf {
         temp.path().join(name)
-    }
-
-    #[test]
-    fn timeout_missing_defaults() {
-        assert_eq!(parse_timeout_seconds(&json!({})), DEFAULT_TIMEOUT_SECONDS);
-    }
-
-    #[test]
-    fn timeout_zero_defaults() {
-        assert_eq!(
-            parse_timeout_seconds(&json!({"timeout_seconds": 0})),
-            DEFAULT_TIMEOUT_SECONDS
-        );
-    }
-
-    #[test]
-    fn timeout_valid_used() {
-        assert_eq!(parse_timeout_seconds(&json!({"timeout_seconds": 12})), 12);
-    }
-
-    #[test]
-    fn timeout_huge_clamped() {
-        assert_eq!(
-            parse_timeout_seconds(&json!({"timeout_seconds": 999999})),
-            MAX_TIMEOUT_SECONDS
-        );
-    }
-
-    #[test]
-    fn summary_adds_marker_within_cap() {
-        let bytes = vec![b'a'; SUMMARY_MAX_BYTES + 100];
-        let summary = bytes_to_bounded_summary(bytes, true);
-
-        assert!(summary.ends_with(TRUNCATION_MARKER));
-        assert!(summary.len() <= SUMMARY_MAX_BYTES);
-    }
-
-    #[test]
-    fn summary_caps_after_lossy_utf8() {
-        let bytes = vec![0xff; SUMMARY_MAX_BYTES];
-        let summary = bytes_to_bounded_summary(bytes, false);
-
-        assert!(summary.len() <= SUMMARY_MAX_BYTES);
-    }
-
-    #[test]
-    fn summary_truncates_on_char_boundary() {
-        let value = "é".repeat(SUMMARY_MAX_BYTES);
-        let capped = cap_summary_string(value, true);
-
-        assert!(capped.len() <= SUMMARY_MAX_BYTES);
-        assert!(capped.ends_with(TRUNCATION_MARKER));
     }
 
     #[cfg(unix)]
