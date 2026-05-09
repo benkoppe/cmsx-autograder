@@ -83,9 +83,6 @@ pub struct TestResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerAuthClaims {
-    pub iss: String,
-    pub aud: String,
-    pub jti: Uuid,
     pub method: String,
     pub path: String,
     pub body_sha256: String,

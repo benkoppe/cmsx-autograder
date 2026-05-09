@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 pub struct ProvisionedWorker {
     pub worker_id: Uuid,
+    pub key_id: Uuid,
     pub name: String,
     pub private_key_base64: String,
     pub public_key_fingerprint: String,
@@ -74,12 +75,13 @@ pub async fn provision_worker(db: &PgPool, name: &str) -> Result<ProvisionedWork
 
     Ok(ProvisionedWorker {
         worker_id,
+        key_id,
         name: name.to_string(),
         private_key_base64,
         public_key_fingerprint,
     })
 }
 
-fn public_key_fingerprint(public_key_pem: &str) -> String {
+pub fn public_key_fingerprint(public_key_pem: &str) -> String {
     hex::encode(Sha256::digest(public_key_pem.as_bytes()))
 }

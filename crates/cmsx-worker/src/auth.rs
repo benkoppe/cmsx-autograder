@@ -32,11 +32,9 @@ impl WorkerSigner {
     pub fn authorization_header(&self, method: &str, path: &str, body: &[u8]) -> Result<String> {
         let body_sha256 = hex::encode(Sha256::digest(body));
         let issuer = format!("worker-key:{}", self.fingerprint);
+        let jti = uuid::Uuid::now_v7();
 
         let custom = WorkerAuthClaims {
-            iss: issuer.clone(),
-            aud: WORKER_AUDIENCE.to_string(),
-            jti: uuid::Uuid::now_v7(),
             method: method.to_string(),
             path: path.to_string(),
             body_sha256,
@@ -45,7 +43,8 @@ impl WorkerSigner {
         let claims =
             Claims::with_custom_claims(custom, jwt_simple::prelude::Duration::from_secs(30))
                 .with_audience(WORKER_AUDIENCE)
-                .with_issuer(issuer);
+                .with_issuer(issuer)
+                .with_jwt_id(jti.to_string());
 
         let token = self.key.sign(claims).context("failed to sign worker jwt")?;
         Ok(format!("WorkerJWT {token}"))

@@ -14,16 +14,19 @@ edition = "2024"
 [workspace.dependencies]
 anyhow = "1"
 axum = { version = "0.8", features = ["multipart"] }
+assert_cmd = "2"
 base64 = "0.22"
 bollard = "0.21"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
 figment = { version = "0.10", features = ["env", "toml"] }
 futures-util = "0.3"
 http-body-util = "0.1"
 indoc = "2"
 jwt-simple = "0.12"
 object_store = { version = "0.13", features = ["aws"] }
+predicates = "3"
 reqwest = { version = "0.13", features = [
   "rustls",
   "json",
