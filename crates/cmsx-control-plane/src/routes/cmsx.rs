@@ -5,8 +5,10 @@ use argon2::{
     password_hash::{Error as PasswordHashError, PasswordHash},
 };
 use axum::{
-    extract::{Multipart, Path, State, multipart::Field},
+    Router,
+    extract::{DefaultBodyLimit, Multipart, Path, State, multipart::Field},
     http::StatusCode,
+    routing::post,
 };
 use bytes::{Bytes, BytesMut};
 use chrono::Utc;
@@ -16,6 +18,13 @@ use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
 use crate::{app::AppState, error::ApiError};
+
+pub fn router(max_body_bytes: usize) -> Router<AppState> {
+    Router::new().route(
+        "/cmsx/a/{slug}/submit",
+        post(submit).layer(DefaultBodyLimit::max(max_body_bytes)),
+    )
+}
 
 #[derive(Debug, Default)]
 struct CmsxSubmission {

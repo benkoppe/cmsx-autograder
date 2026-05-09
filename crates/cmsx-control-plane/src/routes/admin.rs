@@ -3,9 +3,10 @@ use argon2::{
     password_hash::{SaltString, rand_core::OsRng},
 };
 use axum::{
-    Json,
+    Json, Router,
     extract::{FromRef, FromRequestParts, Path, State},
     http::{StatusCode, header, request::Parts},
+    routing::{get, post},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Utc};
@@ -16,6 +17,37 @@ use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
 use crate::{app::AppState, error::ApiError, workers};
+
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/admin/assignments",
+            get(list_assignments).post(create_assignment),
+        )
+        .route(
+            "/admin/assignments/{slug}",
+            get(get_assignment).patch(update_assignment),
+        )
+        .route(
+            "/admin/assignments/{slug}/tokens",
+            get(list_assignment_tokens).post(create_assignment_token),
+        )
+        .route(
+            "/admin/assignments/{slug}/tokens/{token_id}/revoke",
+            post(revoke_assignment_token),
+        )
+        .route("/admin/workers", get(list_workers).post(create_worker))
+        .route("/admin/workers/{worker_id}", get(get_worker))
+        .route(
+            "/admin/workers/{worker_id}/keys",
+            get(list_worker_keys).post(create_worker_key),
+        )
+        .route(
+            "/admin/workers/{worker_id}/keys/{key_id}/revoke",
+            post(revoke_worker_key),
+        )
+        .route("/admin/workers/{worker_id}/disable", post(disable_worker))
+}
 
 const DEFAULT_WORKER_VERSION: &str = "0.1.0";
 

@@ -1,6 +1,7 @@
 use axum::{
-    Json,
+    Json, Router,
     extract::{Path, State},
+    routing::get,
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -9,6 +10,10 @@ use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
 use crate::{app::AppState, error::ApiError};
+
+pub fn router() -> Router<AppState> {
+    Router::new().route("/assignments/{slug}", get(get_assignment))
+}
 
 #[derive(Debug, Serialize)]
 pub struct AssignmentResponse {

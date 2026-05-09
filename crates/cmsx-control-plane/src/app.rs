@@ -24,71 +24,12 @@ pub fn router(state: AppState) -> Router {
     let max_body_bytes = state.cmsx.max_body_bytes;
 
     Router::new()
-        .route("/healthz", get(routes::health::healthz))
-        .route(
-            "/assignments/{slug}",
-            get(routes::assignments::get_assignment),
-        )
-        .route(
-            "/cmsx/a/{slug}/submit",
-            post(routes::cmsx::submit).layer(DefaultBodyLimit::max(max_body_bytes)),
-        )
-        .route("/workers/heartbeat", post(routes::workers::heartbeat))
-        .route("/workers/jobs/claim", post(routes::workers::claim_job))
-        .route("/workers/jobs/{job_id}", get(routes::workers::get_job))
-        .route(
-            "/workers/jobs/{job_id}/events",
-            post(routes::workers::post_events),
-        )
-        .route(
-            "/workers/jobs/{job_id}/result",
-            post(routes::workers::post_result),
-        )
-        .route(
-            "/workers/jobs/{job_id}/started",
-            post(routes::workers::post_started),
-        )
-        .route(
-            "/workers/jobs/{job_id}/failed",
-            post(routes::workers::post_failed),
-        )
-        .route(
-            "/workers/jobs/{job_id}/files/{file_id}",
-            get(routes::workers::get_job_file),
-        )
-        .route(
-            "/admin/assignments",
-            get(routes::admin::list_assignments).post(routes::admin::create_assignment),
-        )
-        .route(
-            "/admin/assignments/{slug}",
-            get(routes::admin::get_assignment).patch(routes::admin::update_assignment),
-        )
-        .route(
-            "/admin/assignments/{slug}/tokens",
-            get(routes::admin::list_assignment_tokens).post(routes::admin::create_assignment_token),
-        )
-        .route(
-            "/admin/assignments/{slug}/tokens/{token_id}/revoke",
-            post(routes::admin::revoke_assignment_token),
-        )
-        .route(
-            "/admin/workers",
-            get(routes::admin::list_workers).post(routes::admin::create_worker),
-        )
-        .route("/admin/workers/{worker_id}", get(routes::admin::get_worker))
-        .route(
-            "/admin/workers/{worker_id}/keys",
-            get(routes::admin::list_worker_keys).post(routes::admin::create_worker_key),
-        )
-        .route(
-            "/admin/workers/{worker_id}/keys/{key_id}/revoke",
-            post(routes::admin::revoke_worker_key),
-        )
-        .route(
-            "/admin/workers/{worker_id}/disable",
-            post(routes::admin::disable_worker),
-        )
+        .merge(routes::health::router())
+        .merge(routes::assignments::router())
+        .merge(routes::cmsx::router(max_body_bytes))
+        .merge(routes::workers::router())
+        .merge(routes::admin::router())
+        .merge(routes::inspection::router())
         .with_state(state)
         .layer(TraceLayer::new_for_http())
 }

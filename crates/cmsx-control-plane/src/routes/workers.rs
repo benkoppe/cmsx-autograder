@@ -1,11 +1,12 @@
 use std::collections::HashSet;
 
 use axum::{
-    Json,
+    Json, Router,
     body::{Body, Bytes},
     extract::{FromRef, FromRequest, FromRequestParts, Path, Request, State},
     http::{HeaderMap, StatusCode, header, request::Parts},
     response::Response,
+    routing::{get, post},
 };
 use chrono::{Duration, Utc};
 use jwt_simple::prelude::*;
@@ -21,6 +22,18 @@ use cmsx_core::{
 };
 
 use crate::{app::AppState, error::ApiError};
+
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route("/workers/heartbeat", post(heartbeat))
+        .route("/workers/jobs/claim", post(claim_job))
+        .route("/workers/jobs/{job_id}", get(get_job))
+        .route("/workers/jobs/{job_id}/events", post(post_events))
+        .route("/workers/jobs/{job_id}/result", post(post_result))
+        .route("/workers/jobs/{job_id}/started", post(post_started))
+        .route("/workers/jobs/{job_id}/failed", post(post_failed))
+        .route("/workers/jobs/{job_id}/files/{file_id}", get(get_job_file))
+}
 
 const WORKER_REQUEST_MAX_BYTES: usize = 1024 * 1024;
 const WORKER_EVENT_BATCH_MAX_EVENTS: usize = 512;
