@@ -133,6 +133,7 @@ pub struct ClaimedJob {
     pub id: Uuid,
     pub submission_id: Uuid,
     pub assignment_id: Uuid,
+    pub assignment_slug: String,
     pub lease_expires_at: DateTime<Utc>,
     pub attempt: i32,
     pub execution_config: serde_json::Value,

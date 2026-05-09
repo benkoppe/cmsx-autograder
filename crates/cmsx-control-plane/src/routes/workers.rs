@@ -487,6 +487,7 @@ async fn load_claimed_job_in_tx(
             grading_jobs.id,
             grading_jobs.submission_id,
             grading_jobs.assignment_id,
+            assignments.slug AS assignment_slug,
             grading_jobs.lease_expires_at,
             grading_jobs.attempts,
             assignments.execution_config AS "execution_config: SqlxJson<Value>",
@@ -513,6 +514,7 @@ async fn load_claimed_job_in_tx(
         id: row.id,
         submission_id: row.submission_id,
         assignment_id: row.assignment_id,
+        assignment_slug: row.assignment_slug,
         lease_expires_at: row
             .lease_expires_at
             .ok_or_else(|| ApiError::internal("active job has no lease"))?,
@@ -575,6 +577,7 @@ async fn load_owned_job(
             grading_jobs.id,
             grading_jobs.submission_id,
             grading_jobs.assignment_id,
+            assignments.slug AS assignment_slug,
             grading_jobs.lease_expires_at,
             grading_jobs.attempts,
             assignments.execution_config AS "execution_config: SqlxJson<Value>",
@@ -623,6 +626,7 @@ async fn load_owned_job(
         id: row.id,
         submission_id: row.submission_id,
         assignment_id: row.assignment_id,
+        assignment_slug: row.assignment_slug,
         lease_expires_at: row
             .lease_expires_at
             .ok_or_else(|| ApiError::internal("active job has no lease"))?,

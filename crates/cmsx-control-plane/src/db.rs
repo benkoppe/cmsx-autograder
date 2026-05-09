@@ -3,12 +3,7 @@ use sqlx::{PgPool, postgres::PgConnectOptions};
 use std::str::FromStr;
 
 pub async fn connect(database_url: &str) -> Result<PgPool> {
-    let options =
-        PgConnectOptions::from_str(database_url).context("failed to parse CMSX_DATABASE_URL")?;
-
-    let pool = PgPool::connect_with(options)
-        .await
-        .context("failed to connect to Postgres database")?;
+    let pool = connect_without_migrations(database_url).await?;
 
     sqlx::migrate!("../../migrations")
         .run(&pool)
@@ -16,4 +11,13 @@ pub async fn connect(database_url: &str) -> Result<PgPool> {
         .context("failed to run database migrations")?;
 
     Ok(pool)
+}
+
+pub async fn connect_without_migrations(database_url: &str) -> Result<PgPool> {
+    let options =
+        PgConnectOptions::from_str(database_url).context("failed to parse CMSX_DATABASE_URL")?;
+
+    PgPool::connect_with(options)
+        .await
+        .context("failed to connect to Postgres database")
 }

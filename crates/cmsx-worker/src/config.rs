@@ -25,13 +25,18 @@ pub enum ExecutorConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DockerSocketExecutorConfig {
     pub workspace_root: PathBuf,
+    pub grader_root: PathBuf,
     pub max_jobs: Option<usize>,
+    pub keep_workspaces: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InWorkerExecutorConfig {
     pub workspace_root: PathBuf,
+    pub grader_root: PathBuf,
     pub max_jobs: Option<usize>,
+    pub keep_workspaces: bool,
+    pub python_command: Option<String>,
 }
 
 impl Default for WorkerConfig {
@@ -42,7 +47,10 @@ impl Default for WorkerConfig {
             version: env!("CARGO_PKG_VERSION").to_string(),
             executor: ExecutorConfig::InWorker(InWorkerExecutorConfig {
                 workspace_root: PathBuf::from("data/worker"),
+                grader_root: PathBuf::from("examples/assignments"),
                 max_jobs: None,
+                keep_workspaces: false,
+                python_command: Some("python3".to_string()),
             }),
         }
     }
@@ -71,6 +79,8 @@ impl WorkerConfig {
             bail!("private_key_base64 must be set");
         }
 
+        self.executor.validate()?;
+
         Ok(())
     }
 }
@@ -88,5 +98,48 @@ impl ExecutorConfig {
             Self::DockerSocket(config) => &config.workspace_root,
             Self::InWorker(config) => &config.workspace_root,
         }
+    }
+
+    pub fn grader_root(&self) -> &Path {
+        match self {
+            Self::DockerSocket(config) => &config.grader_root,
+            Self::InWorker(config) => &config.grader_root,
+        }
+    }
+
+    pub fn keep_workspaces(&self) -> bool {
+        match self {
+            Self::DockerSocket(config) => config.keep_workspaces,
+            Self::InWorker(config) => config.keep_workspaces,
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.workspace_root().as_os_str().is_empty() {
+            bail!("executor.workspace_root must be set");
+        }
+        if self.grader_root().as_os_str().is_empty() {
+            bail!("executor.grader_root must be set");
+        }
+        match self {
+            Self::DockerSocket(_) => {}
+            Self::InWorker(config) => config.validate()?,
+        }
+
+        Ok(())
+    }
+}
+
+impl InWorkerExecutorConfig {
+    pub fn python_command(&self) -> &str {
+        self.python_command.as_deref().unwrap_or("python3")
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.python_command().trim().is_empty() {
+            bail!("executor.python_command must not be empty");
+        }
+
+        Ok(())
     }
 }

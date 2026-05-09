@@ -704,7 +704,6 @@ mod tests {
     use serde_json::{Value, json};
     use sqlx::{PgPool, Row, types::Json as SqlxJson};
     use tempfile::TempDir;
-    use tokio::sync::{Mutex, MutexGuard};
     use tower::ServiceExt;
     use uuid::Uuid;
 
@@ -719,14 +718,69 @@ mod tests {
     const TEST_SLUG: &str = "intro";
     const TEST_TOKEN: &str = "super_secret";
 
-    static DB_TEST_LOCK: Mutex<()> = Mutex::const_new(());
-
     struct TestApp {
         app: Router,
         db: PgPool,
         storage_root: TempDir,
         assignment_id: Uuid,
-        _db_guard: MutexGuard<'static, ()>,
+        _test_database: TestDatabase,
+    }
+
+    struct TestDatabase {
+        db: PgPool,
+        _admin_db: PgPool,
+        _database_name: String,
+    }
+
+    impl TestDatabase {
+        async fn create(admin_database_url: &str) -> Self {
+            let database_name = format!("cmsx_test_{}", Uuid::now_v7().simple());
+
+            let admin_database_url = database_url_with_database(admin_database_url, "postgres");
+            let admin_db = db::connect_without_migrations(&admin_database_url)
+                .await
+                .expect("failed to connect admin test database");
+
+            create_database(&admin_db, &database_name).await;
+
+            let test_database_url =
+                database_url_with_database(admin_database_url.as_str(), &database_name);
+            let db = db::connect(&test_database_url)
+                .await
+                .expect("failed to connect isolated test database");
+
+            Self {
+                db,
+                _admin_db: admin_db,
+                _database_name: database_name,
+            }
+        }
+    }
+
+    fn database_url_with_database(database_url: &str, database_name: &str) -> String {
+        let mut url = url::Url::parse(database_url).expect("test database URL should be valid");
+        url.set_path(database_name);
+        url.to_string()
+    }
+
+    async fn create_database(admin_db: &PgPool, database_name: &str) {
+        let sql = format!("CREATE DATABASE {}", quote_identifier(database_name));
+
+        sqlx::query(&sql)
+            .execute(admin_db)
+            .await
+            .expect("failed to create isolated test database");
+    }
+
+    fn quote_identifier(identifier: &str) -> String {
+        assert!(
+            identifier
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+            "test database identifier must be alphanumeric or underscore"
+        );
+
+        format!("\"{identifier}\"")
     }
 
     struct CmsxMultipart {
@@ -999,16 +1053,11 @@ mod tests {
     }
 
     async fn test_app(configure_cmsx: impl FnOnce(&mut CmsxConfig)) -> TestApp {
-        let db_guard = DB_TEST_LOCK.lock().await;
-
         let database_url = env::var("CMSX_DATABASE_URL")
             .expect("CMSX_DATABASE_URL must be set to run CMSX ingestion tests");
 
-        let db = db::connect(&database_url)
-            .await
-            .expect("failed to connect test database");
-
-        reset_database(&db).await;
+        let test_database = TestDatabase::create(&database_url).await;
+        let db = test_database.db.clone();
 
         let storage_root = TempDir::new().expect("failed to create temp storage root");
         let storage_path = storage_root.path().join("storage");
@@ -1042,15 +1091,8 @@ mod tests {
             db,
             storage_root,
             assignment_id,
-            _db_guard: db_guard,
+            _test_database: test_database,
         }
-    }
-
-    async fn reset_database(db: &PgPool) {
-        sqlx::query("TRUNCATE TABLE assignments, workers, runner_environments CASCADE")
-            .execute(db)
-            .await
-            .expect("failed to reset test database");
     }
 
     async fn insert_assignment(db: &PgPool) -> Uuid {

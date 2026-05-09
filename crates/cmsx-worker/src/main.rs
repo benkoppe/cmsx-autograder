@@ -1,13 +1,7 @@
-mod auth;
-mod capacity;
-mod client;
-mod config;
-mod worker;
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let config = config::WorkerConfig::load()?;
-    worker::run(config).await
+    let config = cmsx_worker::config::WorkerConfig::load()?;
+    cmsx_worker::worker::run(config).await
 }
