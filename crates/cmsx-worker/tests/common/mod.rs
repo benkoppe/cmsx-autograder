@@ -7,7 +7,7 @@ use serde_json::Value;
 use tempfile::{Builder, TempDir};
 use uuid::Uuid;
 
-use cmsx_core::{ClaimedJob, GradingResult};
+use cmsx_core::{ClaimedJob, GradingResult, ResultStatus};
 use cmsx_worker::workspace::{JobWorkspace, set_runtime_workspace_permissions};
 
 pub struct ExecutorFixture {
@@ -111,4 +111,10 @@ pub fn sdk_src_path() -> PathBuf {
         .and_then(Path::parent)
         .expect("cmsx-worker should live under crates/cmsx-worker")
         .join("python/sdk/src")
+}
+
+pub fn passed_score(result: &GradingResult, score: f64, max_score: f64) {
+    assert!(matches!(result.status, ResultStatus::Passed));
+    assert_eq!(result.score, score);
+    assert_eq!(result.max_score, max_score);
 }

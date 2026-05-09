@@ -111,9 +111,7 @@ async fn successful_grader_writes_result_json() {
 
     let result = fixture.parent.read_result().await;
 
-    assert!(matches!(result.status, ResultStatus::Passed));
-    assert_eq!(result.score, 10.0);
-    assert_eq!(result.max_score, 10.0);
+    common::passed_score(&result, 10.0, 10.0);
     assert_eq!(result.tests.len(), 1);
 }
 
@@ -156,8 +154,7 @@ async fn executor_sets_expected_environment_and_cwd() {
 
     let result = fixture.parent.read_result().await;
 
-    assert!(matches!(result.status, ResultStatus::Passed));
-    assert_eq!(result.score, 4.0);
+    common::passed_score(&result, 4.0, 4.0);
 }
 
 #[tokio::test]
@@ -222,8 +219,7 @@ async fn grader_can_read_submission_files_and_metadata() {
 
     let result = fixture.parent.read_result().await;
 
-    assert!(matches!(result.status, ResultStatus::Passed));
-    assert_eq!(result.score, 3.0);
+    common::passed_score(&result, 3.0, 3.0);
 }
 
 #[tokio::test]

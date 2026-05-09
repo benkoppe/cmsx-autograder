@@ -7,7 +7,6 @@ use indoc::indoc;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use cmsx_core::ResultStatus;
 use cmsx_worker::{
     config::DockerSocketExecutorConfig,
     events::ExecutorEventSink,
@@ -98,9 +97,7 @@ async fn successful_grader_writes_result_json() {
 
     let result = fixture.read_result().await;
 
-    assert!(matches!(result.status, ResultStatus::Passed));
-    assert_eq!(result.score, 10.0);
-    assert_eq!(result.max_score, 10.0);
+    common::passed_score(&result, 10.0, 10.0);
     assert_eq!(result.tests.len(), 1);
 }
 
@@ -144,8 +141,7 @@ async fn executor_sets_expected_environment_and_cwd() {
 
     let result = fixture.read_result().await;
 
-    assert!(matches!(result.status, ResultStatus::Passed));
-    assert_eq!(result.score, 4.0);
+    common::passed_score(&result, 4.0, 4.0);
 }
 
 #[tokio::test]
@@ -203,8 +199,7 @@ async fn grader_can_read_submission_files_and_metadata() {
 
     let result = fixture.read_result().await;
 
-    assert!(matches!(result.status, ResultStatus::Passed));
-    assert_eq!(result.score, 3.0);
+    common::passed_score(&result, 3.0, 3.0);
 }
 
 #[tokio::test]
@@ -341,8 +336,7 @@ async fn read_only_root_blocks_root_writes_but_tmp_and_workspace_are_writable() 
 
     let result = fixture.read_result().await;
 
-    assert!(matches!(result.status, ResultStatus::Passed));
-    assert_eq!(result.score, 5.0);
+    common::passed_score(&result, 5.0, 5.0);
 }
 
 #[tokio::test]
@@ -379,8 +373,7 @@ async fn runner_uses_fixed_non_root_user() {
 
     let result = fixture.read_result().await;
 
-    assert!(matches!(result.status, ResultStatus::Passed));
-    assert_eq!(result.score, 2.0);
+    common::passed_score(&result, 2.0, 2.0);
 }
 
 #[tokio::test]
@@ -421,6 +414,5 @@ async fn network_is_disabled_by_default() {
 
     let result = fixture.read_result().await;
 
-    assert!(matches!(result.status, ResultStatus::Passed));
-    assert_eq!(result.score, 1.0);
+    common::passed_score(&result, 1.0, 1.0);
 }
