@@ -489,6 +489,23 @@ impl JobLifecycle {
     }
 
     async fn handle_execution_output(&mut self, workspace: &JobWorkspace, output: ExecutionOutput) {
+        match self.current_reason().await {
+            CancellationReason::ControlPlaneCancelled => {
+                self.post_control_plane_cancelled_result(&output).await;
+                return;
+            }
+            CancellationReason::LeaseLost
+                if matches!(output.status, ExecutionStatus::Cancelled) =>
+            {
+                tracing::info!(
+                    job_id = %self.job.id,
+                    "executor cancelled after lease loss; skipping terminal post"
+                );
+                return;
+            }
+            _ => {}
+        }
+
         match output.status {
             ExecutionStatus::Exited { code } => {
                 let result = read_bounded_result_json(&workspace.result_path).await;
@@ -538,30 +555,14 @@ impl JobLifecycle {
                 }
             }
             ExecutionStatus::Cancelled => match self.current_reason().await {
-                CancellationReason::ControlPlaneCancelled => {
-                    self.post_event(job_event_type::JOB_CANCELLED, "Job cancelled", json!({}))
-                        .await;
-
-                    match read_bounded_result_json(&workspace.result_path).await {
-                        Ok(result) => {
-                            self.post_result(result, Some(output.duration_ms), &output)
-                                .await;
-                        }
-                        Err(_) => {
-                            self.post_result(
-                                GradingResult::cancelled(),
-                                Some(output.duration_ms),
-                                &output,
-                            )
-                            .await;
-                        }
-                    }
-                }
                 CancellationReason::LeaseLost => {
                     tracing::info!(
                         job_id = %self.job.id,
                         "executor cancelled after lease loss; skipping terminal post"
                     );
+                }
+                CancellationReason::ControlPlaneCancelled => {
+                    self.post_control_plane_cancelled_result(&output).await;
                 }
                 CancellationReason::None => {
                     tracing::warn!(
@@ -830,6 +831,14 @@ impl JobLifecycle {
                 );
             }
         }
+    }
+
+    async fn post_control_plane_cancelled_result(&mut self, output: &ExecutionOutput) {
+        self.post_event(job_event_type::JOB_CANCELLED, "Job cancelled", json!({}))
+            .await;
+
+        self.post_result(GradingResult::cancelled(), Some(output.duration_ms), output)
+            .await;
     }
 
     async fn post_event(&mut self, event_type: &str, message: &str, data: serde_json::Value) {

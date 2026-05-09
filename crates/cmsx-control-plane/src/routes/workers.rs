@@ -1046,7 +1046,7 @@ pub async fn post_failed(
 
     let row = sqlx::query!(
         r#"
-        SELECT attempts, max_attempts
+        SELECT attempts, max_attempts, cancel_requested_at
         FROM grading_jobs
         WHERE id = $1
           AND worker_id = $2
@@ -1062,6 +1062,10 @@ pub async fn post_failed(
     .await
     .map_err(ApiError::internal)?
     .ok_or_else(|| ApiError::not_found("active job not found"))?;
+
+    if row.cancel_requested_at.is_some() {
+        return Err(ApiError::conflict("job cancellation requested"));
+    }
 
     if value.retryable && row.attempts < row.max_attempts {
         sqlx::query!(
