@@ -403,8 +403,6 @@ async fn cleanup_stored_files(state: &AppState, stored_files: &[StoredSubmission
 }
 
 fn verify_any_token(token: &str, token_hashes: &[AssignmentTokenHash]) -> Result<bool, ApiError> {
-    let mut usable_hashes = 0_usize;
-
     for token_hash in token_hashes {
         let parsed_hash = match PasswordHash::new(&token_hash.token_hash) {
             Ok(parsed_hash) => parsed_hash,
@@ -418,8 +416,6 @@ fn verify_any_token(token: &str, token_hashes: &[AssignmentTokenHash]) -> Result
             }
         };
 
-        usable_hashes += 1;
-
         match Argon2::default().verify_password(token.as_bytes(), &parsed_hash) {
             Ok(()) => return Ok(true),
             Err(PasswordHashError::Password) => {}
@@ -431,10 +427,6 @@ fn verify_any_token(token: &str, token_hashes: &[AssignmentTokenHash]) -> Result
                 );
             }
         }
-    }
-
-    if usable_hashes == 0 {
-        return Err(ApiError::internal("assignment has no usable token hashes"));
     }
 
     Ok(false)
@@ -691,29 +683,21 @@ fn human_readable_bytes(bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{env, fs, path::Path};
+    use std::{fs, path::Path};
 
-    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
     use axum::{
         Router,
         body::Body,
         http::{Request, StatusCode, header},
         response::Response,
     };
-    use http_body_util::BodyExt;
     use serde_json::{Value, json};
     use sqlx::{PgPool, Row, types::Json as SqlxJson};
     use tempfile::TempDir;
-    use tower::ServiceExt;
     use uuid::Uuid;
 
     use super::*;
-    use crate::{
-        app,
-        config::{CmsxConfig, StorageConfig},
-        db,
-        storage::Storage,
-    };
+    use crate::{config::CmsxConfig, test_support};
 
     const TEST_SLUG: &str = "intro";
     const TEST_TOKEN: &str = "super_secret";
@@ -723,64 +707,7 @@ mod tests {
         db: PgPool,
         storage_root: TempDir,
         assignment_id: Uuid,
-        _test_database: TestDatabase,
-    }
-
-    struct TestDatabase {
-        db: PgPool,
-        _admin_db: PgPool,
-        _database_name: String,
-    }
-
-    impl TestDatabase {
-        async fn create(admin_database_url: &str) -> Self {
-            let database_name = format!("cmsx_test_{}", Uuid::now_v7().simple());
-
-            let admin_database_url = database_url_with_database(admin_database_url, "postgres");
-            let admin_db = db::connect_without_migrations(&admin_database_url)
-                .await
-                .expect("failed to connect admin test database");
-
-            create_database(&admin_db, &database_name).await;
-
-            let test_database_url =
-                database_url_with_database(admin_database_url.as_str(), &database_name);
-            let db = db::connect(&test_database_url)
-                .await
-                .expect("failed to connect isolated test database");
-
-            Self {
-                db,
-                _admin_db: admin_db,
-                _database_name: database_name,
-            }
-        }
-    }
-
-    fn database_url_with_database(database_url: &str, database_name: &str) -> String {
-        let mut url = url::Url::parse(database_url).expect("test database URL should be valid");
-        url.set_path(database_name);
-        url.to_string()
-    }
-
-    async fn create_database(admin_db: &PgPool, database_name: &str) {
-        let sql = format!("CREATE DATABASE {}", quote_identifier(database_name));
-
-        sqlx::query(&sql)
-            .execute(admin_db)
-            .await
-            .expect("failed to create isolated test database");
-    }
-
-    fn quote_identifier(identifier: &str) -> String {
-        assert!(
-            identifier
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
-            "test database identifier must be alphanumeric or underscore"
-        );
-
-        format!("\"{identifier}\"")
+        _test_database: test_support::TestDatabase,
     }
 
     struct CmsxMultipart {
@@ -1053,46 +980,17 @@ mod tests {
     }
 
     async fn test_app(configure_cmsx: impl FnOnce(&mut CmsxConfig)) -> TestApp {
-        let database_url = env::var("CMSX_DATABASE_URL")
-            .expect("CMSX_DATABASE_URL must be set to run CMSX ingestion tests");
+        let shared = test_support::test_app_with_cmsx(configure_cmsx).await;
 
-        let test_database = TestDatabase::create(&database_url).await;
-        let db = test_database.db.clone();
-
-        let storage_root = TempDir::new().expect("failed to create temp storage root");
-        let storage_path = storage_root.path().join("storage");
-        fs::create_dir_all(&storage_path).expect("failed to create temp storage directory");
-
-        let storage = Storage::from_config(&StorageConfig::Local {
-            root: storage_path,
-            prefix: String::new(),
-        })
-        .expect("failed to initialize test storage");
-
-        let mut cmsx = CmsxConfig {
-            max_body_bytes: 1024 * 1024,
-            max_field_bytes: 1024,
-            max_file_bytes: 1024 * 1024,
-            max_files: 16,
-        };
-        configure_cmsx(&mut cmsx);
-
-        let assignment_id = insert_assignment(&db).await;
-        insert_assignment_token(&db, assignment_id, TEST_TOKEN).await;
-
-        let state = app::AppState {
-            db: db.clone(),
-            storage,
-            cmsx,
-            admin: crate::config::AdminConfig::default(),
-        };
+        let assignment_id = insert_assignment(&shared.db).await;
+        insert_assignment_token(&shared.db, assignment_id, TEST_TOKEN).await;
 
         TestApp {
-            app: app::router(state),
-            db,
-            storage_root,
+            app: shared.app,
+            db: shared.db,
+            storage_root: shared.storage_root,
             assignment_id,
-            _test_database: test_database,
+            _test_database: shared._test_database,
         }
     }
 
@@ -1135,12 +1033,7 @@ mod tests {
     async fn insert_assignment_token(db: &PgPool, assignment_id: Uuid, token: &str) {
         let token_id = Uuid::now_v7();
         let now = Utc::now();
-        let salt = SaltString::from_b64("Y21zeC10ZXN0LXNhbHQ")
-            .expect("test salt should be valid password-hash base64");
-        let token_hash = Argon2::default()
-            .hash_password(token.as_bytes(), &salt)
-            .expect("failed to hash test token")
-            .to_string();
+        let token_hash = test_support::hash_test_token(token);
 
         sqlx::query(
             r#"
@@ -1174,43 +1067,16 @@ mod tests {
                 .body(Body::from(multipart.body))
                 .expect("failed to build request");
 
-            self.app
-                .clone()
-                .oneshot(request)
-                .await
-                .expect("request failed")
+            test_support::request(&self.app, request).await
         }
     }
 
     async fn response_json(response: Response) -> (StatusCode, Value) {
-        let status = response.status();
-        let body = response
-            .into_body()
-            .collect()
-            .await
-            .expect("failed to read response body")
-            .to_bytes();
-
-        let json = serde_json::from_slice(&body).unwrap_or_else(|error| {
-            panic!(
-                "response body was not JSON: {error}; body={}",
-                String::from_utf8_lossy(&body)
-            )
-        });
-
-        (status, json)
+        test_support::response_json(response).await
     }
 
     async fn response_body(response: Response) -> (StatusCode, bytes::Bytes) {
-        let status = response.status();
-        let body = response
-            .into_body()
-            .collect()
-            .await
-            .expect("failed to read response body")
-            .to_bytes();
-
-        (status, body)
+        test_support::response_body(response).await
     }
 
     async fn assert_no_content_success(response: Response) {

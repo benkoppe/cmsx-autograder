@@ -394,7 +394,7 @@ pub async fn create_assignment_token(
     let assignment_id = assignment_id_for_slug(&state, &slug).await?;
 
     let token_id = Uuid::now_v7();
-    let token = generate_secret("cmsx_assignment");
+    let token = generate_secret("ca");
     let token_hash = hash_secret(&token)?;
     let now = Utc::now();
 
@@ -824,11 +824,7 @@ fn hash_secret(secret: &str) -> Result<String, ApiError> {
 }
 
 fn generate_secret(prefix: &str) -> String {
-    format!(
-        "{prefix}_{}_{}",
-        Uuid::new_v4().simple(),
-        Uuid::new_v4().simple()
-    )
+    format!("{prefix}_{}", Uuid::new_v4().simple())
 }
 
 fn worker_config_response(state: &AppState, private_key_base64: &str) -> WorkerConfigResponse {
@@ -886,4 +882,510 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
     };
 
     db_error.code().as_deref() == Some("23505")
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use cmsx_core::{
+        ClaimJobRequest, GradingResult, JobEventBatchRequest, JobEventPayload, JobResultRequest,
+        ResultStatus, TestResult, WorkerHeartbeatRequest, WorkerStatus,
+    };
+
+    use crate::test_support;
+
+    #[tokio::test]
+    async fn admin_routes_reject_missing_bearer_token() {
+        let app = test_support::test_app().await;
+
+        let response = test_support::get(&app.app, "/admin/assignments").await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_routes_accept_valid_bootstrap_token() {
+        let app = test_support::test_app().await;
+
+        let response = test_support::admin_get(&app.app, "/admin/assignments").await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn create_assignment_persists_assignment() {
+        let app = test_support::test_app().await;
+
+        let response = create_assignment(&app, "python-intro").await;
+        let (status, json) = test_support::response_json(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["slug"], "python-intro");
+        assert_eq!(json["name"], "Python Intro");
+        assert_eq!(json["max_score"], 100.0);
+
+        let count = sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*)
+            FROM assignments
+            WHERE slug = 'python-intro'
+            "#
+        )
+        .fetch_one(&app.db)
+        .await
+        .expect("failed to count assignments")
+        .unwrap_or(0);
+
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn create_assignment_rejects_duplicate_slug() {
+        let app = test_support::test_app().await;
+
+        let first = create_assignment(&app, "python-intro").await;
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = create_assignment(&app, "python-intro").await;
+        assert_eq!(second.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn update_assignment_persists_mutable_fields() {
+        let app = test_support::test_app().await;
+
+        let created = create_assignment(&app, "python-intro").await;
+        assert_eq!(created.status(), StatusCode::OK);
+
+        let response = test_support::admin_patch_json(
+            &app.app,
+            "/admin/assignments/python-intro",
+            &json!({
+                "name": "Updated Python Intro",
+                "max_score": 50.0,
+                "execution_config": {"timeout_seconds": 30},
+                "runner_config": {"environment": "python"},
+                "capabilities": {"read_files": true}
+            }),
+        )
+        .await;
+
+        let (status, json) = test_support::response_json(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["slug"], "python-intro");
+        assert_eq!(json["name"], "Updated Python Intro");
+        assert_eq!(json["max_score"], 50.0);
+        assert_eq!(json["execution_config"]["timeout_seconds"], 30);
+        assert_eq!(json["runner_config"]["environment"], "python");
+        assert_eq!(json["capabilities"]["read_files"], true);
+    }
+
+    #[tokio::test]
+    async fn create_assignment_token_returns_plaintext_once_and_stores_hash() {
+        let app = test_support::test_app().await;
+
+        let assignment = create_assignment(&app, "python-intro").await;
+        assert_eq!(assignment.status(), StatusCode::OK);
+
+        let response = test_support::admin_post_json(
+            &app.app,
+            "/admin/assignments/python-intro/tokens",
+            &json!({}),
+        )
+        .await;
+
+        let (status, json) = test_support::response_json(response).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let token = json["token"]
+            .as_str()
+            .expect("token should be returned")
+            .to_string();
+
+        assert!(token.starts_with("ca_"));
+        assert!(token.chars().count() <= 36);
+
+        let row = sqlx::query!(
+            r#"
+            SELECT token_hash
+            FROM assignment_tokens
+            WHERE id = $1
+            "#,
+            Uuid::parse_str(json["id"].as_str().unwrap()).unwrap(),
+        )
+        .fetch_one(&app.db)
+        .await
+        .expect("failed to load assignment token");
+
+        assert_ne!(row.token_hash, token);
+        assert!(row.token_hash.starts_with("$argon2"));
+    }
+
+    #[tokio::test]
+    async fn revoked_assignment_token_cannot_submit_cmsx() {
+        let app = test_support::test_app().await;
+
+        assert_eq!(
+            create_assignment(&app, "python-intro").await.status(),
+            StatusCode::OK
+        );
+
+        let token_response = test_support::admin_post_json(
+            &app.app,
+            "/admin/assignments/python-intro/tokens",
+            &json!({}),
+        )
+        .await;
+        let (_, token_json) = test_support::response_json(token_response).await;
+
+        let token_id = token_json["id"].as_str().unwrap();
+        let token = token_json["token"].as_str().unwrap();
+
+        let revoke_response = test_support::admin_post_json(
+            &app.app,
+            &format!("/admin/assignments/python-intro/tokens/{token_id}/revoke"),
+            &json!({}),
+        )
+        .await;
+        assert_eq!(revoke_response.status(), StatusCode::NO_CONTENT);
+
+        let submit_response = test_support::submit_cmsx(&app.app, "python-intro", token).await;
+        assert_eq!(submit_response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn create_worker_returns_config_and_stores_public_key_only() {
+        let app = test_support::test_app().await;
+
+        let response = create_worker(&app, "worker-1").await;
+        let (status, json) = test_support::response_json(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["name"], "worker-1");
+        assert_eq!(
+            json["worker_config"]["control_plane_url"],
+            "http://control-plane.test"
+        );
+        assert!(json["private_key_base64"].as_str().unwrap().len() > 100);
+        assert!(
+            json["worker_config_toml"]
+                .as_str()
+                .unwrap()
+                .contains("private_key_base64")
+        );
+
+        let worker_id = Uuid::parse_str(json["worker_id"].as_str().unwrap()).unwrap();
+
+        let worker = sqlx::query!(
+            r#"
+            SELECT name, status
+            FROM workers
+            WHERE id = $1
+            "#,
+            worker_id,
+        )
+        .fetch_one(&app.db)
+        .await
+        .expect("failed to load worker");
+
+        assert_eq!(worker.name, "worker-1");
+        assert_eq!(worker.status, "offline");
+
+        let key = sqlx::query!(
+            r#"
+            SELECT public_key, public_key_fingerprint
+            FROM worker_keys
+            WHERE worker_id = $1
+            "#,
+            worker_id,
+        )
+        .fetch_one(&app.db)
+        .await
+        .expect("failed to load worker key");
+
+        assert!(key.public_key.contains("PUBLIC KEY"));
+        assert!(!key.public_key.contains("PRIVATE KEY"));
+        assert_eq!(
+            key.public_key_fingerprint,
+            json["public_key_fingerprint"].as_str().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn provisioned_worker_key_can_heartbeat() {
+        let app = test_support::test_app().await;
+
+        let worker_response = create_worker(&app, "worker-1").await;
+        let (_, worker_json) = test_support::response_json(worker_response).await;
+        let private_key = worker_json["private_key_base64"].as_str().unwrap();
+        assert_eq!(
+            test_support::worker_public_key_fingerprint(private_key),
+            worker_json["public_key_fingerprint"].as_str().unwrap()
+        );
+
+        let heartbeat = WorkerHeartbeatRequest {
+            version: "0.1.0".to_string(),
+            status: WorkerStatus::Online,
+            running_jobs: 0,
+            max_jobs: 1,
+            active_job_ids: vec![],
+        };
+
+        let response =
+            test_support::worker_post_json(&app.app, private_key, "/workers/heartbeat", &heartbeat)
+                .await;
+
+        let (status, json) = test_support::response_json(response).await;
+
+        assert_eq!(status, StatusCode::OK, "body={json}");
+        assert_eq!(json["worker_id"], worker_json["worker_id"]);
+        assert_eq!(json["lease_seconds"], 60);
+    }
+
+    #[tokio::test]
+    async fn revoked_worker_key_cannot_heartbeat() {
+        let app = test_support::test_app().await;
+
+        let worker_response = create_worker(&app, "worker-1").await;
+        let (_, worker_json) = test_support::response_json(worker_response).await;
+
+        let worker_id = worker_json["worker_id"].as_str().unwrap();
+        let key_id = worker_json["key_id"].as_str().unwrap();
+        let private_key = worker_json["private_key_base64"].as_str().unwrap();
+
+        let revoke_response = test_support::admin_post_json(
+            &app.app,
+            &format!("/admin/workers/{worker_id}/keys/{key_id}/revoke"),
+            &json!({}),
+        )
+        .await;
+        assert_eq!(revoke_response.status(), StatusCode::NO_CONTENT);
+
+        let heartbeat = WorkerHeartbeatRequest {
+            version: "0.1.0".to_string(),
+            status: WorkerStatus::Online,
+            running_jobs: 0,
+            max_jobs: 1,
+            active_job_ids: vec![],
+        };
+
+        let response =
+            test_support::worker_post_json(&app.app, private_key, "/workers/heartbeat", &heartbeat)
+                .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn disabled_worker_cannot_heartbeat() {
+        let app = test_support::test_app().await;
+
+        let worker_response = create_worker(&app, "worker-1").await;
+        let (_, worker_json) = test_support::response_json(worker_response).await;
+
+        let worker_id = worker_json["worker_id"].as_str().unwrap();
+        let private_key = worker_json["private_key_base64"].as_str().unwrap();
+
+        let disable_response = test_support::admin_post_json(
+            &app.app,
+            &format!("/admin/workers/{worker_id}/disable"),
+            &json!({}),
+        )
+        .await;
+        assert_eq!(disable_response.status(), StatusCode::NO_CONTENT);
+
+        let heartbeat = WorkerHeartbeatRequest {
+            version: "0.1.0".to_string(),
+            status: WorkerStatus::Online,
+            running_jobs: 0,
+            max_jobs: 1,
+            active_job_ids: vec![],
+        };
+
+        let response =
+            test_support::worker_post_json(&app.app, private_key, "/workers/heartbeat", &heartbeat)
+                .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn provisioning_smoke_test_reaches_stored_result() {
+        let app = test_support::test_app().await;
+
+        assert_eq!(
+            create_assignment(&app, "python-intro").await.status(),
+            StatusCode::OK
+        );
+
+        let token_response = test_support::admin_post_json(
+            &app.app,
+            "/admin/assignments/python-intro/tokens",
+            &json!({}),
+        )
+        .await;
+        let (_, token_json) = test_support::response_json(token_response).await;
+        let assignment_token = token_json["token"].as_str().unwrap();
+
+        let worker_response = create_worker(&app, "worker-1").await;
+        let (_, worker_json) = test_support::response_json(worker_response).await;
+        let private_key = worker_json["private_key_base64"].as_str().unwrap();
+
+        let submit_response =
+            test_support::submit_cmsx(&app.app, "python-intro", assignment_token).await;
+        assert_eq!(submit_response.status(), StatusCode::NO_CONTENT);
+
+        let claim = ClaimJobRequest {
+            available_slots: 1,
+            wait_seconds: None,
+        };
+
+        let claim_response =
+            test_support::worker_post_json(&app.app, private_key, "/workers/jobs/claim", &claim)
+                .await;
+        let (claim_status, claim_json) = test_support::response_json(claim_response).await;
+
+        assert_eq!(claim_status, StatusCode::OK);
+        assert_eq!(claim_json["jobs"].as_array().unwrap().len(), 1);
+
+        let job_id = claim_json["jobs"][0]["id"].as_str().unwrap();
+
+        let started_response = test_support::worker_post_json(
+            &app.app,
+            private_key,
+            &format!("/workers/jobs/{job_id}/started"),
+            &json!({}),
+        )
+        .await;
+        assert_eq!(started_response.status(), StatusCode::NO_CONTENT);
+
+        let events = JobEventBatchRequest {
+            events: vec![JobEventPayload {
+                sequence: 0,
+                timestamp: test_support::now_event_timestamp(),
+                event_type: "job.started".to_string(),
+                stream: "worker".to_string(),
+                visibility: "staff".to_string(),
+                message: "Job started".to_string(),
+                data: json!({}),
+            }],
+        };
+
+        let events_response = test_support::worker_post_json(
+            &app.app,
+            private_key,
+            &format!("/workers/jobs/{job_id}/events"),
+            &events,
+        )
+        .await;
+        assert_eq!(events_response.status(), StatusCode::NO_CONTENT);
+
+        let result = JobResultRequest {
+            result: GradingResult {
+                schema_version: "1".to_string(),
+                status: ResultStatus::Passed,
+                score: 100.0,
+                max_score: 100.0,
+                feedback: Some("Looks good".to_string()),
+                tests: vec![TestResult {
+                    name: "smoke".to_string(),
+                    status: ResultStatus::Passed,
+                    score: 100.0,
+                    max_score: 100.0,
+                    message: Some("ok".to_string()),
+                }],
+                artifacts: vec![],
+            },
+            duration_ms: Some(123),
+            stdout_summary: Some("stdout".to_string()),
+            stderr_summary: None,
+        };
+
+        let result_response = test_support::worker_post_json(
+            &app.app,
+            private_key,
+            &format!("/workers/jobs/{job_id}/result"),
+            &result,
+        )
+        .await;
+        assert_eq!(result_response.status(), StatusCode::NO_CONTENT);
+
+        let job_uuid = Uuid::parse_str(job_id).unwrap();
+
+        let stored = sqlx::query!(
+            r#"
+            SELECT
+                grading_jobs.status AS job_status,
+                grading_results.status AS result_status,
+                grading_results.score,
+                grading_results.max_score
+            FROM grading_jobs
+            JOIN grading_results ON grading_results.job_id = grading_jobs.id
+            WHERE grading_jobs.id = $1
+            "#,
+            job_uuid,
+        )
+        .fetch_one(&app.db)
+        .await
+        .expect("failed to load stored result");
+
+        assert_eq!(stored.job_status, "succeeded");
+        assert_eq!(stored.result_status, "passed");
+        assert_eq!(stored.score, 100.0);
+        assert_eq!(stored.max_score, 100.0);
+
+        let event_count = sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*)
+            FROM job_events
+            WHERE job_id = $1
+            "#,
+            job_uuid,
+        )
+        .fetch_one(&app.db)
+        .await
+        .expect("failed to count job events")
+        .unwrap_or(0);
+
+        assert_eq!(event_count, 1);
+    }
+
+    async fn create_assignment(
+        app: &test_support::TestApp,
+        slug: &str,
+    ) -> axum::response::Response {
+        test_support::admin_post_json(
+            &app.app,
+            "/admin/assignments",
+            &json!({
+                "slug": slug,
+                "name": "Python Intro",
+                "max_score": 100.0,
+                "execution_config": {},
+                "runner_config": {},
+                "capabilities": {
+                    "read_files": true,
+                    "run_commands": false,
+                    "execute_student_code": false,
+                    "network": false
+                }
+            }),
+        )
+        .await
+    }
+
+    async fn create_worker(app: &test_support::TestApp, name: &str) -> axum::response::Response {
+        test_support::admin_post_json(
+            &app.app,
+            "/admin/workers",
+            &json!({
+                "name": name
+            }),
+        )
+        .await
+    }
 }

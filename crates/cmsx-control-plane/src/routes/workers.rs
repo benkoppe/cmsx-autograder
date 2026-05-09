@@ -155,14 +155,20 @@ async fn verify_worker_jwt(
             continue;
         };
 
+        if claims.issuer.as_deref() != Some(&format!("worker-key:{fingerprint}")) {
+            continue;
+        }
+
+        let Some(jwt_id) = claims.jwt_id else {
+            continue;
+        };
+
+        let Ok(jti) = Uuid::parse_str(&jwt_id) else {
+            continue;
+        };
+
         let custom = claims.custom;
 
-        if custom.iss != format!("worker-key:{fingerprint}") {
-            continue;
-        }
-        if custom.aud != WORKER_AUDIENCE {
-            continue;
-        }
         if custom.method != method {
             continue;
         }
@@ -173,7 +179,7 @@ async fn verify_worker_jwt(
             continue;
         }
 
-        record_worker_jti(state, worker_id, custom.jti).await?;
+        record_worker_jti(state, worker_id, jti).await?;
 
         return Ok(AuthenticatedWorker { id: worker_id });
     }

@@ -14,6 +14,7 @@ edition = "2024"
 [workspace.dependencies]
 anyhow = "1"
 axum = { version = "0.8", features = ["multipart"] }
+assert_cmd = "2"
 base64 = "0.22"
 bollard = "0.21"
 bytes = "1"
@@ -25,6 +26,7 @@ http-body-util = "0.1"
 indoc = "2"
 jwt-simple = "0.12"
 object_store = { version = "0.13", features = ["aws"] }
+predicates = "3"
 reqwest = { version = "0.13", features = [
   "rustls",
   "json",

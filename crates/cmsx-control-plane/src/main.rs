@@ -7,6 +7,9 @@ mod routes;
 mod storage;
 mod workers;
 
+#[cfg(test)]
+mod test_support;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
