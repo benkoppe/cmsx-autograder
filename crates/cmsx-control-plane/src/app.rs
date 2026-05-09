@@ -1,8 +1,4 @@
-use axum::{
-    Router,
-    extract::DefaultBodyLimit,
-    routing::{get, post},
-};
+use axum::Router;
 use sqlx::PgPool;
 use tower_http::trace::TraceLayer;
 
@@ -25,11 +21,11 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .merge(routes::health::router())
-        .merge(routes::assignments::router())
         .merge(routes::cmsx::router(max_body_bytes))
         .merge(routes::workers::router())
         .merge(routes::admin::router())
-        .merge(routes::inspection::router())
+        .merge(routes::jobs::router())
+        .merge(routes::submissions::router())
         .with_state(state)
         .layer(TraceLayer::new_for_http())
 }

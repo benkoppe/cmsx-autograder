@@ -1,6 +1,7 @@
 pub mod admin;
-pub mod assignments;
 pub mod cmsx;
+pub mod common;
 pub mod health;
-pub mod inspection;
+pub mod jobs;
+pub mod submissions;
 pub mod workers;
