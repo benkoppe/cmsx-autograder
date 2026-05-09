@@ -352,18 +352,41 @@ async fn reconcile_active_jobs(
             continue;
         };
 
-        if row.worker_id != Some(worker_id)
-            || !matches!(row.status.as_str(), "claimed" | "running")
-            || row
-                .lease_expires_at
-                .is_none_or(|expires_at| expires_at <= now)
+        if row.worker_id != Some(worker_id) || !matches!(row.status.as_str(), "claimed" | "running")
         {
             unknown_job_ids.push(*job_id);
             continue;
         }
 
         if row.cancel_requested_at.is_some() {
+            sqlx::query!(
+                r#"
+                UPDATE grading_jobs
+                SET lease_expires_at = $3,
+                    last_heartbeat_at = $4
+                WHERE id = $1
+                  AND worker_id = $2
+                  AND status IN ('claimed', 'running')
+                  AND cancel_requested_at IS NOT NULL
+                "#,
+                job_id,
+                worker_id,
+                now + Duration::seconds(LEASE_SECONDS),
+                now
+            )
+            .execute(&mut **tx)
+            .await
+            .map_err(ApiError::internal)?;
+
             cancelled_job_ids.push(*job_id);
+            continue;
+        }
+
+        if row
+            .lease_expires_at
+            .is_none_or(|expires_at| expires_at <= now)
+        {
+            unknown_job_ids.push(*job_id);
             continue;
         }
 
@@ -427,7 +450,10 @@ async fn claim_available_jobs(
             SELECT grading_jobs.id
             FROM grading_jobs
             WHERE (
-                grading_jobs.status = 'queued'
+                (
+                    grading_jobs.status = 'queued'
+                    AND grading_jobs.cancel_requested_at IS NULL
+                )
                 OR (
                     grading_jobs.status IN ('claimed', 'running')
                     AND grading_jobs.lease_expires_at <= $2
@@ -479,6 +505,22 @@ async fn mark_exhausted_expired_jobs(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     now: chrono::DateTime<Utc>,
 ) -> Result<(), ApiError> {
+    sqlx::query!(
+        r#"
+        UPDATE grading_jobs
+        SET status = 'cancelled',
+            finished_at = $1,
+            lease_expires_at = NULL
+        WHERE status IN ('claimed', 'running')
+          AND lease_expires_at <= $1
+          AND cancel_requested_at IS NOT NULL
+        "#,
+        now
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(ApiError::internal)?;
+
     sqlx::query!(
         r#"
         UPDATE grading_jobs
@@ -694,6 +736,29 @@ pub async fn post_started(
     .map_err(ApiError::internal)?;
 
     if update.rows_affected() != 1 {
+        let cancellation_requested = sqlx::query_scalar!(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM grading_jobs
+                WHERE id = $1
+                  AND worker_id = $2
+                  AND status = 'claimed'
+                  AND lease_expires_at > $3
+                  AND cancel_requested_at IS NOT NULL
+            )
+            "#,
+            job_id,
+            worker.id,
+            now,
+        )
+        .fetch_one(&state.db)
+        .await
+        .map_err(ApiError::internal)?
+        .unwrap_or(false);
+        if cancellation_requested {
+            return Err(ApiError::conflict("job cancellation requested"));
+        }
         return Err(ApiError::not_found("startable job not found"));
     }
 

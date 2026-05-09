@@ -10,6 +10,8 @@ use serde_json::Value;
 use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
+use cmsx_core::{GradingResult, JobStatus, ResultStatus, protocol::GRADING_RESULT_SCHEMA_VERSION};
+
 use crate::{
     app::AppState,
     error::ApiError,
@@ -243,46 +245,130 @@ pub async fn cancel_job(
     Path(job_id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let now = Utc::now();
-
-    let update = sqlx::query!(
-        r#"
-        UPDATE grading_jobs
-        SET cancel_requested_at = $2
-        WHERE id = $1
-          AND status IN ('queued', 'claimed', 'running')
-          AND cancel_requested_at IS NULL
-        "#,
-        job_id,
-        now,
-    )
-    .execute(&state.db)
-    .await
-    .map_err(ApiError::internal)?;
-
-    if update.rows_affected() == 1 {
-        return Ok(StatusCode::NO_CONTENT);
-    }
+    let mut tx = state.db.begin().await.map_err(ApiError::internal)?;
 
     let row = sqlx::query!(
         r#"
         SELECT status, cancel_requested_at
         FROM grading_jobs
         WHERE id = $1
+        FOR UPDATE
         "#,
-        job_id,
+        job_id
     )
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(ApiError::internal)?
     .ok_or_else(|| ApiError::not_found("job not found"))?;
 
-    if matches!(row.status.as_str(), "queued" | "claimed" | "running")
-        && row.cancel_requested_at.is_some()
-    {
-        return Ok(StatusCode::NO_CONTENT);
+    let status = row
+        .status
+        .parse::<JobStatus>()
+        .map_err(|_| ApiError::internal("invalid job status in database"))?;
+
+    match status {
+        JobStatus::Queued => {
+            // terminalize immediately
+            sqlx::query!(
+                r#"
+                UPDATE grading_jobs
+                SET status = 'cancelled',
+                    cancel_requested_at = COALESCE(cancel_requested_at, $2),
+                    finished_at = $2,
+                    lease_expires_at = NULL,
+                    worker_id = NULL,
+                    claimed_at = NULL,
+                    started_at = NULL,
+                    last_heartbeat_at = NULL
+                WHERE id = $1
+                "#,
+                job_id,
+                now,
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(ApiError::internal)?;
+            insert_cancelled_result(&mut tx, job_id, now).await?;
+        }
+        JobStatus::Claimed | JobStatus::Running if row.cancel_requested_at.is_none() => {
+            // request active cancellation
+            sqlx::query!(
+                r#"
+                UPDATE grading_jobs
+                SET cancel_requested_at = $2
+                WHERE id = $1
+                "#,
+                job_id,
+                now,
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(ApiError::internal)?;
+        }
+        JobStatus::Claimed | JobStatus::Running | JobStatus::Cancelled => {
+            // idempotent cancellation request
+        }
+        JobStatus::Succeeded | JobStatus::Failed | JobStatus::Error => {
+            return Err(ApiError::conflict("job is already terminal"));
+        }
     }
 
-    Err(ApiError::conflict("job is already terminal"))
+    tx.commit().await.map_err(ApiError::internal)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn insert_cancelled_result(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    job_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), ApiError> {
+    let result = cancelled_result();
+    let result_json = serde_json::to_value(&result).map_err(ApiError::internal)?;
+    let tests_json = serde_json::to_value(&result.tests).map_err(ApiError::internal)?;
+
+    sqlx::query!(
+        r#"
+        INSERT INTO grading_results (
+            id,
+            job_id,
+            status,
+            score,
+            max_score,
+            feedback,
+            tests,
+            result,
+            stdout_summary,
+            stderr_summary,
+            duration_ms,
+            created_at
+        )
+        VALUES ($1, $2, 'cancelled', 0, 0, $3, $4, $5, NULL, NULL, 0, $6)
+        ON CONFLICT (job_id) DO NOTHING
+        "#,
+        Uuid::now_v7(),
+        job_id,
+        result.feedback,
+        SqlxJson(tests_json) as _,
+        SqlxJson(result_json) as _,
+        now,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(ApiError::internal)?;
+
+    Ok(())
+}
+
+fn cancelled_result() -> GradingResult {
+    GradingResult {
+        schema_version: GRADING_RESULT_SCHEMA_VERSION.to_string(),
+        status: ResultStatus::Cancelled,
+        score: 0.0,
+        max_score: 0.0,
+        feedback: Some("Job cancelled".to_string()),
+        tests: Vec::new(),
+        artifacts: Vec::new(),
+    }
 }
 
 async fn ensure_job_exists(state: &AppState, job_id: Uuid) -> Result<(), ApiError> {
@@ -526,6 +612,129 @@ mod tests {
         .await;
 
         assert_eq!(repeated.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn cancel_queued_job_terminalizes_immediately() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_queued_job(&app).await;
+
+        let response = test_support::admin_post_json(
+            &app.app,
+            &format!("/jobs/{}/cancel", setup.job_id),
+            &json!({}),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let row = sqlx::query!(
+            r#"
+            SELECT grading_jobs.status, grading_jobs.finished_at, grading_results.status AS "result_status?"
+            FROM grading_jobs
+            LEFT JOIN grading_results ON grading_results.job_id = grading_jobs.id
+            WHERE grading_jobs.id = $1
+            "#,
+            setup.job_id,
+        )
+        .fetch_one(&app.db)
+        .await
+        .expect("failed to load cancelled job");
+
+        assert_eq!(row.status, "cancelled");
+        assert!(row.finished_at.is_some());
+        assert_eq!(row.result_status.as_deref(), Some("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_queued_job_is_not_claimed() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_queued_job(&app).await;
+        let private_key = test_support::create_test_worker(&app).await;
+
+        test_support::admin_post_json(
+            &app.app,
+            &format!("/jobs/{}/cancel", setup.job_id),
+            &json!({}),
+        )
+        .await;
+
+        let response = test_support::worker_post_json(
+            &app.app,
+            &private_key,
+            "/workers/jobs/claim",
+            &cmsx_core::ClaimJobRequest {
+                available_slots: 1,
+                wait_seconds: Some(0),
+            },
+        )
+        .await;
+
+        let (status, body) = test_support::response_json(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["jobs"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn heartbeat_extends_lease_for_cancelled_active_job() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_running_job(&app).await;
+
+        test_support::admin_post_json(
+            &app.app,
+            &format!("/jobs/{}/cancel", setup.job_id),
+            &json!({}),
+        )
+        .await;
+
+        let before = sqlx::query_scalar!(
+            r#"
+            SELECT lease_expires_at
+            FROM grading_jobs
+            WHERE id = $1
+            "#,
+            setup.job_id,
+        )
+        .fetch_one(&app.db)
+        .await
+        .unwrap()
+        .unwrap();
+
+        let heartbeat = cmsx_core::WorkerHeartbeatRequest {
+            version: "0.1.0".to_string(),
+            status: cmsx_core::WorkerStatus::Online,
+            running_jobs: 1,
+            max_jobs: 1,
+            active_job_ids: vec![setup.job_id],
+        };
+
+        let response = test_support::worker_post_json(
+            &app.app,
+            &setup.private_key,
+            "/workers/heartbeat",
+            &heartbeat,
+        )
+        .await;
+        let (status, body) = test_support::response_json(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cancelled_job_ids"][0], setup.job_id.to_string());
+
+        let after = sqlx::query_scalar!(
+            r#"
+            SELECT lease_expires_at
+            FROM grading_jobs
+            WHERE id = $1
+            "#,
+            setup.job_id,
+        )
+        .fetch_one(&app.db)
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert!(after > before);
     }
 
     #[tokio::test]

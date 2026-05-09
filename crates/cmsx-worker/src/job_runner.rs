@@ -428,6 +428,13 @@ impl JobLifecycle {
                 self.handle_post_started_404().await;
                 return Ok(());
             }
+            Err(error) if error.is_status(StatusCode::CONFLICT) => {
+                self.mark_cancellation(CancellationReason::ControlPlaneCancelled)
+                    .await;
+                self.cancel.cancel();
+                self.handle_cancelled_before_executor().await;
+                return Ok(());
+            }
             Err(error) => {
                 self.post_failed(
                     FAILURE_WORKSPACE_ERROR,
