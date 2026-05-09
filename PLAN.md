@@ -339,14 +339,13 @@ Rules:
 
 ## Python Grader SDK
 
-Instructor-authored graders should be Python scripts using a small SDK. The SDK should hide CMSX multipart details and provide a pleasant interface for common grading operations.
+Instructor-authored graders should be Python scripts using a small SDK. The SDK should hide CMSX multipart details and provide a pleasant interface for common grading operations. Graders expose a normal `main(submission)` function; importing a grader module must not execute grading.
 
 Example:
 
 ```python
-from cmsx_autograder import grade, Result
+from cmsx_autograder import Result
 
-@grade
 def main(submission):
     result = Result(max_score=100)
 
@@ -360,8 +359,18 @@ def main(submission):
     return result
 ```
 
+The runner invokes graders explicitly:
+
+```sh
+python -m cmsx_autograder /grader/grade.py
+```
+
+The SDK imports `grade.py`, looks for `main(submission)`, executes it, validates the returned `Result`, and writes `/output/result.json`. If grader loading or execution fails, the SDK should write a structured `error` result and exit nonzero so the worker can distinguish infrastructure failures from ordinary failed submissions.
+
 The SDK should provide:
 
+- Explicit `main(submission)` entrypoint.
+- No import-time execution.
 - Submission metadata access.
 - File lookup by uploaded filename and problem name.
 - Command execution helpers.
@@ -371,6 +380,7 @@ The SDK should provide:
 - Result construction.
 - Structured status updates.
 - JSON result writing.
+- Structured error result writing when grader loading or execution fails.
 - Friendly error handling.
 - Optional helper libraries for common tasks such as PDF form parsing.
 
