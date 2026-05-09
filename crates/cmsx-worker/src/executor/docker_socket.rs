@@ -16,11 +16,11 @@ use serde_json::json;
 use tokio::{task::JoinHandle, time::Duration};
 use tokio_util::sync::CancellationToken;
 
-use cmsx_core::ClaimedJob;
+use cmsx_core::{ClaimedJob, protocol::job_event_type};
 
 use crate::{
     config::DockerSocketExecutorConfig,
-    events::{ExecutorEvent, ExecutorEventSink, event_type},
+    events::{ExecutorEvent, ExecutorEventSink},
     executor::{
         ExecutionOutput, ExecutionStatus,
         utils::{OutputSummaries, normalize_timeout_seconds},
@@ -87,7 +87,7 @@ impl DockerSocketExecutor {
             .await?;
 
         event_sink.emit(ExecutorEvent::worker(
-            event_type::EXECUTOR_CONTAINER_CREATED,
+            job_event_type::EXECUTOR_CONTAINER_CREATED,
             "Docker container created",
             json!({
                 "container_id": container.id,
@@ -103,7 +103,7 @@ impl DockerSocketExecutor {
         ));
 
         event_sink.emit(ExecutorEvent::worker(
-            event_type::EXECUTOR_CONTAINER_STARTED,
+            job_event_type::EXECUTOR_CONTAINER_STARTED,
             "Docker container started",
             json!({
                 "container_id": container_id,

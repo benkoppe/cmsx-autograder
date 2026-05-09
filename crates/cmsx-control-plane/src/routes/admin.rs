@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
-use crate::{app::AppState, error::ApiError, workers};
+use crate::{app::AppState, db, error::ApiError, workers};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -273,7 +273,7 @@ pub async fn create_assignment(
     .fetch_one(&state.db)
     .await
     .map_err(|error| {
-        if is_unique_violation(&error) {
+        if db::is_unique_violation(&error) {
             ApiError::conflict("assignment slug already exists")
         } else {
             ApiError::internal(error)
@@ -908,14 +908,6 @@ fn worker_response(row: WorkerRow) -> WorkerResponse {
     }
 }
 
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    let Some(db_error) = error.as_database_error() else {
-        return false;
-    };
-
-    db_error.code().as_deref() == Some("23505")
-}
-
 #[cfg(test)]
 mod tests {
     use axum::http::StatusCode;
@@ -925,6 +917,9 @@ mod tests {
     use cmsx_core::{
         ClaimJobRequest, GradingResult, JobEventBatchRequest, JobEventPayload, JobResultRequest,
         ResultStatus, TestResult, WorkerHeartbeatRequest, WorkerStatus,
+        protocol::{
+            GRADING_RESULT_SCHEMA_VERSION, JobEventStream, JobEventVisibility, job_event_type,
+        },
     };
 
     use crate::test_support;
@@ -1299,9 +1294,9 @@ mod tests {
             events: vec![JobEventPayload {
                 sequence: 0,
                 timestamp: test_support::now_event_timestamp(),
-                event_type: "job.started".to_string(),
-                stream: "worker".to_string(),
-                visibility: "staff".to_string(),
+                event_type: job_event_type::JOB_STARTED.to_string(),
+                stream: JobEventStream::Worker.as_str().to_string(),
+                visibility: JobEventVisibility::Staff.as_str().to_string(),
                 message: "Job started".to_string(),
                 data: json!({}),
             }],
@@ -1318,7 +1313,7 @@ mod tests {
 
         let result = JobResultRequest {
             result: GradingResult {
-                schema_version: "1".to_string(),
+                schema_version: GRADING_RESULT_SCHEMA_VERSION.to_string(),
                 status: ResultStatus::Passed,
                 score: 100.0,
                 max_score: 100.0,

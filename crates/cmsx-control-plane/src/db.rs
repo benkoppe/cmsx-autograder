@@ -21,3 +21,11 @@ pub async fn connect_without_migrations(database_url: &str) -> Result<PgPool> {
         .await
         .context("failed to connect to Postgres database")
 }
+
+pub fn is_unique_violation(error: &sqlx::Error) -> bool {
+    let Some(db_error) = error.as_database_error() else {
+        return false;
+    };
+
+    db_error.code().as_deref() == Some("23505")
+}

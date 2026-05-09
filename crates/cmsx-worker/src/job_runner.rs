@@ -13,12 +13,13 @@ use uuid::Uuid;
 use cmsx_core::{
     ClaimedJob, GradingResult, JobEventBatchRequest, JobEventPayload, JobFailureRequest,
     JobResultRequest, ResultStatus,
+    protocol::{GRADING_RESULT_SCHEMA_VERSION, JOB_EVENT_MESSAGE_MAX_BYTES, job_event_type},
 };
 
 use crate::{
     client::{ClientError, ControlPlaneClient, cap_message_bytes},
     config::WorkerConfig,
-    events::{ExecutorEvent, ExecutorEventSink, JobEventWriterCommand, event_type},
+    events::{ExecutorEvent, ExecutorEventSink, JobEventWriterCommand},
     executor::{ExecutionOutput, ExecutionStatus, Executor},
     worker::{CancellationReason, apply_cancellation_reason},
     workspace::{
@@ -40,7 +41,7 @@ pub const FAILURE_TIMEOUT: &str = "timeout";
 pub const FAILURE_LEASE_LOST: &str = "lease_lost";
 pub const FAILURE_WORKSPACE_ERROR: &str = "workspace_error";
 
-pub const FAILURE_MESSAGE_MAX_BYTES: usize = 64 * 1024;
+pub const FAILURE_MESSAGE_MAX_BYTES: usize = JOB_EVENT_MESSAGE_MAX_BYTES;
 
 struct JobLifecycle {
     client: ControlPlaneClient,
@@ -51,7 +52,7 @@ struct JobLifecycle {
 }
 
 const EVENT_BATCH_TARGET_EVENTS: usize = 50;
-const EVENT_BATCH_FLUSH_BYTES: usize = 64 * 1024;
+const EVENT_BATCH_FLUSH_APPROX_BYTES: usize = JOB_EVENT_MESSAGE_MAX_BYTES;
 const EVENT_FLUSH_INTERVAL_MS: u64 = 250;
 
 #[derive(Clone)]
@@ -204,7 +205,7 @@ impl JobEventWriter {
         self.buffer.push(payload);
 
         if self.buffer.len() >= EVENT_BATCH_TARGET_EVENTS
-            || self.buffered_bytes >= EVENT_BATCH_FLUSH_BYTES
+            || self.buffered_bytes >= EVENT_BATCH_FLUSH_APPROX_BYTES
         {
             self.flush_buffer().await;
         }
@@ -386,7 +387,7 @@ impl JobLifecycle {
         }
 
         self.post_event(
-            event_type::JOB_INPUT_PREPARED,
+            job_event_type::JOB_INPUT_PREPARED,
             "Input files prepared",
             json!({}),
         )
@@ -439,7 +440,7 @@ impl JobLifecycle {
         let executor_backend = executor.backend_name();
 
         self.post_event(
-            event_type::EXECUTOR_STARTED,
+            job_event_type::EXECUTOR_STARTED,
             "Executor started",
             json!({ "backend": executor_backend }),
         )
@@ -485,7 +486,7 @@ impl JobLifecycle {
             ExecutionStatus::Exited { code } => {
                 let result = read_bounded_result_json(&workspace.result_path).await;
                 self.post_event(
-                    event_type::RESULT_READ,
+                    job_event_type::RESULT_READ,
                     "Result file read",
                     json!({ "status": result_read_event_status(&result) }),
                 )
@@ -523,7 +524,7 @@ impl JobLifecycle {
             }
             ExecutionStatus::TimedOut => {
                 if self.current_reason().await != CancellationReason::LeaseLost {
-                    self.post_event(event_type::JOB_TIMEOUT, "Job timed out", json!({}))
+                    self.post_event(job_event_type::JOB_TIMEOUT, "Job timed out", json!({}))
                         .await;
                     self.post_failed(FAILURE_TIMEOUT, "Job timed out".to_string(), false)
                         .await;
@@ -531,7 +532,7 @@ impl JobLifecycle {
             }
             ExecutionStatus::Cancelled => match self.current_reason().await {
                 CancellationReason::ControlPlaneCancelled => {
-                    self.post_event(event_type::JOB_CANCELLED, "Job cancelled", json!({}))
+                    self.post_event(job_event_type::JOB_CANCELLED, "Job cancelled", json!({}))
                         .await;
 
                     match read_bounded_result_json(&workspace.result_path).await {
@@ -1043,7 +1044,7 @@ pub fn should_post_terminal_for_reason(reason: CancellationReason) -> bool {
 
 fn explicit_cancelled_result() -> GradingResult {
     GradingResult {
-        schema_version: "1".to_string(),
+        schema_version: GRADING_RESULT_SCHEMA_VERSION.to_string(),
         status: ResultStatus::Cancelled,
         score: 0.0,
         max_score: 0.0,
@@ -1107,7 +1108,7 @@ mod tests {
     fn explicit_cancelled_result_shape() {
         let result = explicit_cancelled_result();
 
-        assert_eq!(result.schema_version, "1");
+        assert_eq!(result.schema_version, GRADING_RESULT_SCHEMA_VERSION);
         assert!(matches!(result.status, ResultStatus::Cancelled));
         assert_eq!(result.score, 0.0);
         assert_eq!(result.max_score, 0.0);

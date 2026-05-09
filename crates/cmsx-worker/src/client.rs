@@ -10,11 +10,12 @@ use uuid::Uuid;
 use cmsx_core::{
     ClaimJobRequest, ClaimJobResponse, ClaimedJob, JobEventBatchRequest, JobFailureRequest,
     JobResultRequest, StartedJobRequest, WorkerHeartbeatRequest, WorkerHeartbeatResponse,
+    protocol::JOB_EVENT_MESSAGE_MAX_BYTES,
 };
 
 use crate::auth::WorkerSigner;
 
-pub const ERROR_BODY_MAX_BYTES: usize = 64 * 1024;
+pub const ERROR_BODY_MAX_BYTES: usize = JOB_EVENT_MESSAGE_MAX_BYTES;
 
 pub type ClientResult<T> = std::result::Result<T, ClientError>;
 
