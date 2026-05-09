@@ -255,3 +255,195 @@ async fn ensure_submission_exists(state: &AppState, submission_id: Uuid) -> Resu
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+    use uuid::Uuid;
+
+    use crate::test_support;
+
+    #[tokio::test]
+    async fn submission_routes_reject_missing_admin_token() {
+        let app = test_support::test_app().await;
+        let submission_id = Uuid::now_v7();
+
+        let submissions = test_support::get(
+            &app.app,
+            &format!(
+                "/assignments/{}/submissions",
+                test_support::TEST_ASSIGNMENT_SLUG
+            ),
+        )
+        .await;
+        let results =
+            test_support::get(&app.app, &format!("/submissions/{submission_id}/results")).await;
+
+        assert_eq!(submissions.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(results.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn list_assignment_submissions_returns_submission_with_file_count_and_latest_job() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_queued_job(&app).await;
+
+        let response = test_support::admin_get(
+            &app.app,
+            &format!(
+                "/assignments/{}/submissions",
+                test_support::TEST_ASSIGNMENT_SLUG
+            ),
+        )
+        .await;
+        let (status, body) = test_support::response_json(response).await;
+        let submissions = body.as_array().expect("submissions should be an array");
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(submissions.len(), 1);
+        assert_eq!(submissions[0]["id"], setup.submission_id.to_string());
+        assert_eq!(submissions[0]["cmsx_group_id"], "group-1");
+        assert_eq!(submissions[0]["cmsx_assignment_id"], "cmsx-assignment-1");
+        assert_eq!(submissions[0]["cmsx_assignment_name"], "CMSX Assignment 1");
+        assert_eq!(submissions[0]["netids_raw"], "abc123,def456");
+        assert_eq!(submissions[0]["file_count"], 1);
+        assert_eq!(submissions[0]["latest_job"]["id"], setup.job_id.to_string());
+        assert_eq!(submissions[0]["latest_job"]["status"], "queued");
+    }
+
+    #[tokio::test]
+    async fn list_assignment_submissions_returns_latest_completed_job_state() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_completed_job(&app).await;
+
+        let response = test_support::admin_get(
+            &app.app,
+            &format!(
+                "/assignments/{}/submissions",
+                test_support::TEST_ASSIGNMENT_SLUG
+            ),
+        )
+        .await;
+        let (status, body) = test_support::response_json(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body[0]["latest_job"]["id"], setup.job_id.to_string());
+        assert_eq!(body[0]["latest_job"]["status"], "succeeded");
+        assert!(!body[0]["latest_job"]["started_at"].is_null());
+        assert!(!body[0]["latest_job"]["finished_at"].is_null());
+    }
+
+    #[tokio::test]
+    async fn list_assignment_submissions_rejects_nonpositive_limit() {
+        let app = test_support::test_app().await;
+        test_support::create_test_assignment(&app).await;
+
+        let response = test_support::admin_get(
+            &app.app,
+            &format!(
+                "/assignments/{}/submissions?limit=0",
+                test_support::TEST_ASSIGNMENT_SLUG
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn list_assignment_submissions_caps_large_limit() {
+        let app = test_support::test_app().await;
+        test_support::setup_queued_job(&app).await;
+
+        let response = test_support::admin_get(
+            &app.app,
+            &format!(
+                "/assignments/{}/submissions?limit=999999",
+                test_support::TEST_ASSIGNMENT_SLUG
+            ),
+        )
+        .await;
+        let (status, body) = test_support::response_json(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_assignment_submissions_returns_not_found_for_missing_assignment() {
+        let app = test_support::test_app().await;
+
+        let response = test_support::admin_get(&app.app, "/assignments/missing/submissions").await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_submission_results_returns_stored_results() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_completed_job(&app).await;
+
+        let response = test_support::admin_get(
+            &app.app,
+            &format!("/submissions/{}/results", setup.submission_id),
+        )
+        .await;
+        let (status, body) = test_support::response_json(response).await;
+        let results = body.as_array().expect("results should be an array");
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["job_id"], setup.job_id.to_string());
+        assert_eq!(results[0]["job_status"], "succeeded");
+        assert_eq!(results[0]["result_status"], "passed");
+        assert_eq!(results[0]["score"], 100.0);
+        assert_eq!(results[0]["stdout_summary"], "stdout");
+        assert_eq!(results[0]["tests"][0]["name"], "smoke");
+    }
+
+    #[tokio::test]
+    async fn get_submission_results_returns_empty_for_submission_without_results() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_queued_job(&app).await;
+
+        let response = test_support::admin_get(
+            &app.app,
+            &format!("/submissions/{}/results", setup.submission_id),
+        )
+        .await;
+        let (status, body) = test_support::response_json(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.as_array()
+                .expect("results should be an array")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn get_submission_results_returns_not_found_for_missing_submission() {
+        let app = test_support::test_app().await;
+        let submission_id = Uuid::now_v7();
+
+        let response =
+            test_support::admin_get(&app.app, &format!("/submissions/{submission_id}/results"))
+                .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_assignment_lookup_is_removed() {
+        let app = test_support::test_app().await;
+        test_support::create_test_assignment(&app).await;
+
+        let response = test_support::get(
+            &app.app,
+            &format!("/assignments/{}", test_support::TEST_ASSIGNMENT_SLUG),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+}

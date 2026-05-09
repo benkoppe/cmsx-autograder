@@ -307,3 +307,289 @@ async fn ensure_job_exists(state: &AppState, job_id: Uuid) -> Result<(), ApiErro
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use cmsx_core::{WorkerHeartbeatRequest, WorkerStatus};
+
+    use crate::test_support;
+
+    #[tokio::test]
+    async fn job_routes_reject_missing_admin_token() {
+        let app = test_support::test_app().await;
+        let job_id = Uuid::now_v7();
+
+        let response = test_support::get(&app.app, &format!("/jobs/{job_id}")).await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn get_job_returns_queued_job() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_queued_job(&app).await;
+
+        let response = test_support::admin_get(&app.app, &format!("/jobs/{}", setup.job_id)).await;
+        let (status, body) = test_support::response_json(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["id"], setup.job_id.to_string());
+        assert_eq!(body["submission_id"], setup.submission_id.to_string());
+        assert_eq!(body["assignment_slug"], test_support::TEST_ASSIGNMENT_SLUG);
+        assert_eq!(body["status"], "queued");
+        assert!(body["worker_id"].is_null());
+        assert!(body["result"].is_null());
+    }
+
+    #[tokio::test]
+    async fn get_job_returns_claimed_job_with_worker() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_claimed_job(&app).await;
+
+        let response = test_support::admin_get(&app.app, &format!("/jobs/{}", setup.job_id)).await;
+        let (status, body) = test_support::response_json(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "claimed");
+        assert_eq!(body["worker_name"], test_support::TEST_WORKER_NAME);
+        assert_eq!(body["attempts"], 1);
+        assert!(!body["worker_id"].is_null());
+        assert!(!body["lease_expires_at"].is_null());
+    }
+
+    #[tokio::test]
+    async fn get_job_returns_completed_job_with_result_summary() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_completed_job(&app).await;
+
+        let response = test_support::admin_get(&app.app, &format!("/jobs/{}", setup.job_id)).await;
+        let (status, body) = test_support::response_json(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "succeeded");
+        assert_eq!(body["result"]["status"], "passed");
+        assert_eq!(body["result"]["score"], 100.0);
+        assert_eq!(body["result"]["max_score"], 100.0);
+        assert_eq!(body["result"]["duration_ms"], 123);
+    }
+
+    #[tokio::test]
+    async fn get_job_events_returns_sequence_order() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_claimed_job(&app).await;
+
+        test_support::post_test_job_events(
+            &app,
+            &setup,
+            vec![
+                test_support::test_event(0, "first"),
+                test_support::test_event(1, "second"),
+                test_support::test_event(2, "third"),
+            ],
+        )
+        .await;
+
+        let response =
+            test_support::admin_get(&app.app, &format!("/jobs/{}/events", setup.job_id)).await;
+        let (status, body) = test_support::response_json(response).await;
+        let events = body["events"]
+            .as_array()
+            .expect("events should be an array");
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0]["sequence"], 0);
+        assert_eq!(events[1]["sequence"], 1);
+        assert_eq!(events[2]["sequence"], 2);
+        assert_eq!(body["next_after_sequence"], 2);
+    }
+
+    #[tokio::test]
+    async fn get_job_events_after_sequence_skips_old_events() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_claimed_job(&app).await;
+
+        test_support::post_test_job_events(
+            &app,
+            &setup,
+            vec![
+                test_support::test_event(0, "first"),
+                test_support::test_event(1, "second"),
+                test_support::test_event(2, "third"),
+            ],
+        )
+        .await;
+
+        let response = test_support::admin_get(
+            &app.app,
+            &format!("/jobs/{}/events?after_sequence=0", setup.job_id),
+        )
+        .await;
+        let (status, body) = test_support::response_json(response).await;
+        let events = body["events"]
+            .as_array()
+            .expect("events should be an array");
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["sequence"], 1);
+        assert_eq!(events[1]["sequence"], 2);
+        assert_eq!(body["next_after_sequence"], 2);
+    }
+
+    #[tokio::test]
+    async fn get_job_events_rejects_negative_after_sequence() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_queued_job(&app).await;
+
+        let response = test_support::admin_get(
+            &app.app,
+            &format!("/jobs/{}/events?after_sequence=-1", setup.job_id),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_job_events_rejects_nonpositive_limit() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_queued_job(&app).await;
+
+        let response =
+            test_support::admin_get(&app.app, &format!("/jobs/{}/events?limit=0", setup.job_id))
+                .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_job_events_caps_large_limit() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_claimed_job(&app).await;
+
+        test_support::post_test_job_events(
+            &app,
+            &setup,
+            vec![test_support::test_event(0, "first")],
+        )
+        .await;
+
+        let response = test_support::admin_get(
+            &app.app,
+            &format!("/jobs/{}/events?limit=999999", setup.job_id),
+        )
+        .await;
+        let (status, body) = test_support::response_json(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["events"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancel_queued_job_sets_cancel_requested_at() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_queued_job(&app).await;
+
+        let response = test_support::admin_post_json(
+            &app.app,
+            &format!("/jobs/{}/cancel", setup.job_id),
+            &json!({}),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let cancel_requested_at = sqlx::query_scalar!(
+            r#"
+            SELECT cancel_requested_at
+            FROM grading_jobs
+            WHERE id = $1
+            "#,
+            setup.job_id,
+        )
+        .fetch_one(&app.db)
+        .await
+        .expect("failed to load job cancellation");
+
+        assert!(cancel_requested_at.is_some());
+
+        let repeated = test_support::admin_post_json(
+            &app.app,
+            &format!("/jobs/{}/cancel", setup.job_id),
+            &json!({}),
+        )
+        .await;
+
+        assert_eq!(repeated.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn cancel_running_job_is_observed_by_heartbeat() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_running_job(&app).await;
+
+        let response = test_support::admin_post_json(
+            &app.app,
+            &format!("/jobs/{}/cancel", setup.job_id),
+            &json!({}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let heartbeat = WorkerHeartbeatRequest {
+            version: "0.1.0".to_string(),
+            status: WorkerStatus::Online,
+            running_jobs: 1,
+            max_jobs: 1,
+            active_job_ids: vec![setup.job_id],
+        };
+
+        let response = test_support::worker_post_json(
+            &app.app,
+            &setup.private_key,
+            "/workers/heartbeat",
+            &heartbeat,
+        )
+        .await;
+        let (status, body) = test_support::response_json(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cancelled_job_ids"][0], setup.job_id.to_string());
+    }
+
+    #[tokio::test]
+    async fn cancel_terminal_job_returns_conflict() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_completed_job(&app).await;
+
+        let response = test_support::admin_post_json(
+            &app.app,
+            &format!("/jobs/{}/cancel", setup.job_id),
+            &json!({}),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn missing_job_returns_not_found() {
+        let app = test_support::test_app().await;
+        let job_id = Uuid::now_v7();
+
+        let get_job = test_support::admin_get(&app.app, &format!("/jobs/{job_id}")).await;
+        let cancel_job =
+            test_support::admin_post_json(&app.app, &format!("/jobs/{job_id}/cancel"), &json!({}))
+                .await;
+        let get_events = test_support::admin_get(&app.app, &format!("/jobs/{job_id}/events")).await;
+
+        assert_eq!(get_job.status(), StatusCode::NOT_FOUND);
+        assert_eq!(cancel_job.status(), StatusCode::NOT_FOUND);
+        assert_eq!(get_events.status(), StatusCode::NOT_FOUND);
+    }
+}

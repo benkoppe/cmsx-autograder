@@ -15,14 +15,17 @@ use chrono::Utc;
 use http_body_util::BodyExt;
 use jwt_simple::{prelude::*, token::Token};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tempfile::TempDir;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use cmsx_core::WorkerAuthClaims;
+use cmsx_core::{
+    ClaimJobRequest, GradingResult, JobEventBatchRequest, JobEventPayload, JobResultRequest,
+    ResultStatus, TestResult, WorkerAuthClaims,
+};
 
 use crate::{
     app,
@@ -34,6 +37,20 @@ use crate::{
 const WORKER_AUDIENCE: &str = "cmsx-control-plane";
 
 pub const TEST_ADMIN_TOKEN: &str = "cmsx_admin_test_secret";
+pub const TEST_ASSIGNMENT_SLUG: &str = "python-intro";
+pub const TEST_ASSIGNMENT_NAME: &str = "Python Intro";
+pub const TEST_WORKER_NAME: &str = "worker-1";
+
+pub struct TestQueuedJob {
+    pub submission_id: Uuid,
+    pub job_id: Uuid,
+}
+
+pub struct TestClaimedJob {
+    pub submission_id: Uuid,
+    pub job_id: Uuid,
+    pub private_key: String,
+}
 
 pub struct TestApp {
     pub app: Router,
@@ -309,6 +326,210 @@ pub async fn submit_cmsx(app: &Router, slug: &str, token: &str) -> Response {
             .expect("failed to build CMSX request"),
     )
     .await
+}
+
+pub async fn create_test_assignment(app: &TestApp) {
+    let response = admin_post_json(
+        &app.app,
+        "/admin/assignments",
+        &json!({
+            "slug": TEST_ASSIGNMENT_SLUG,
+            "name": TEST_ASSIGNMENT_NAME,
+            "max_score": 100.0,
+            "execution_config": {},
+            "runner_config": {},
+            "capabilities": {
+                "read_files": true,
+                "run_commands": false,
+                "execute_student_code": false,
+                "network": false
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+pub async fn create_test_assignment_token(app: &TestApp) -> String {
+    let response = admin_post_json(
+        &app.app,
+        &format!("/admin/assignments/{TEST_ASSIGNMENT_SLUG}/tokens"),
+        &json!({}),
+    )
+    .await;
+    let (status, body) = response_json(response).await;
+
+    assert_eq!(status, StatusCode::OK);
+    body["token"]
+        .as_str()
+        .expect("token should exist")
+        .to_string()
+}
+
+pub async fn create_test_worker(app: &TestApp) -> String {
+    let response = admin_post_json(
+        &app.app,
+        "/admin/workers",
+        &json!({
+            "name": TEST_WORKER_NAME
+        }),
+    )
+    .await;
+    let (status, body) = response_json(response).await;
+
+    assert_eq!(status, StatusCode::OK);
+    body["private_key_base64"]
+        .as_str()
+        .expect("private key should exist")
+        .to_string()
+}
+
+pub async fn setup_queued_job(app: &TestApp) -> TestQueuedJob {
+    create_test_assignment(app).await;
+    let token = create_test_assignment_token(app).await;
+
+    let response = submit_cmsx(&app.app, TEST_ASSIGNMENT_SLUG, &token).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let row = sqlx::query!(
+        r#"
+        SELECT submissions.id AS submission_id, grading_jobs.id AS job_id
+        FROM submissions
+        JOIN grading_jobs ON grading_jobs.submission_id = submissions.id
+        ORDER BY submissions.received_at DESC, submissions.id DESC
+        LIMIT 1
+        "#
+    )
+    .fetch_one(&app.db)
+    .await
+    .expect("failed to load queued test job");
+
+    TestQueuedJob {
+        submission_id: row.submission_id,
+        job_id: row.job_id,
+    }
+}
+
+pub async fn setup_claimed_job(app: &TestApp) -> TestClaimedJob {
+    let queued = setup_queued_job(app).await;
+    let private_key = create_test_worker(app).await;
+
+    let claim = ClaimJobRequest {
+        available_slots: 1,
+        wait_seconds: None,
+    };
+
+    let response = worker_post_json(&app.app, &private_key, "/workers/jobs/claim", &claim).await;
+    let (status, body) = response_json(response).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["jobs"]
+            .as_array()
+            .expect("jobs should be an array")
+            .len(),
+        1
+    );
+    assert_eq!(body["jobs"][0]["id"], queued.job_id.to_string());
+
+    TestClaimedJob {
+        submission_id: queued.submission_id,
+        job_id: queued.job_id,
+        private_key,
+    }
+}
+
+pub async fn setup_running_job(app: &TestApp) -> TestClaimedJob {
+    let claimed = setup_claimed_job(app).await;
+
+    let response = worker_post_json(
+        &app.app,
+        &claimed.private_key,
+        &format!("/workers/jobs/{}/started", claimed.job_id),
+        &json!({}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    claimed
+}
+
+pub async fn setup_completed_job(app: &TestApp) -> TestClaimedJob {
+    let running = setup_running_job(app).await;
+    post_test_job_result(app, &running).await;
+    running
+}
+
+pub async fn post_test_job_events(
+    app: &TestApp,
+    job: &TestClaimedJob,
+    events: Vec<JobEventPayload>,
+) {
+    let request = JobEventBatchRequest { events };
+
+    let response = worker_post_json(
+        &app.app,
+        &job.private_key,
+        &format!("/workers/jobs/{}/events", job.job_id),
+        &request,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+pub async fn post_test_job_result(app: &TestApp, job: &TestClaimedJob) {
+    let result = JobResultRequest {
+        result: GradingResult {
+            schema_version: "1".to_string(),
+            status: ResultStatus::Passed,
+            score: 100.0,
+            max_score: 100.0,
+            feedback: Some("Looks good".to_string()),
+            tests: vec![TestResult {
+                name: "smoke".to_string(),
+                status: ResultStatus::Passed,
+                score: 100.0,
+                max_score: 100.0,
+                message: Some("ok".to_string()),
+            }],
+            artifacts: vec![],
+        },
+        duration_ms: Some(123),
+        stdout_summary: Some("stdout".to_string()),
+        stderr_summary: None,
+    };
+
+    let response = worker_post_json(
+        &app.app,
+        &job.private_key,
+        &format!("/workers/jobs/{}/result", job.job_id),
+        &result,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+pub fn test_event(sequence: i64, message: &str) -> JobEventPayload {
+    JobEventPayload {
+        sequence,
+        timestamp: now_event_timestamp(),
+        event_type: if sequence == 0 {
+            "job.started".to_string()
+        } else {
+            "stdout".to_string()
+        },
+        stream: if sequence == 0 {
+            "worker".to_string()
+        } else {
+            "stdout".to_string()
+        },
+        visibility: "staff".to_string(),
+        message: message.to_string(),
+        data: json!({}),
+    }
 }
 
 struct CmsxMultipart {
