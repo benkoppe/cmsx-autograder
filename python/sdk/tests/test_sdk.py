@@ -3,13 +3,41 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
 import pytest
 
-from cmsx_autograder import CheckResult, Result, Status, Submission
+from cmsx_autograder import CheckResult, JsonObject, Result, Status, Submission
 
 
-def test_importing_grade_file_does_not_write_result(tmp_path):
+def read_result_json(output_dir: Path) -> JsonObject:
+    value = json.loads((output_dir / "result.json").read_text(encoding="utf-8"))
+
+    assert isinstance(value, dict)
+
+    return cast(JsonObject, value)
+
+
+def run_grade_cli(
+    grade_file: Path,
+    input_dir: Path,
+    work_dir: Path,
+    output_dir: Path,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "cmsx_autograder", str(grade_file)],
+        env={
+            "CMSX_INPUT_DIR": str(input_dir),
+            "CMSX_WORK_DIR": str(work_dir),
+            "CMSX_OUTPUT_DIR": str(output_dir),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_importing_grade_file_does_not_write_result(tmp_path: Path) -> None:
     grade_file = tmp_path / "grade.py"
     output_dir = tmp_path / "output"
     grade_file.write_text(
@@ -25,14 +53,16 @@ def main(submission):
     )
 
     spec = importlib.util.spec_from_file_location("test_grade", grade_file)
-    module = importlib.util.module_from_spec(spec)
+    assert spec is not None
     assert spec.loader is not None
+
+    module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
     assert not (output_dir / "result.json").exists()
 
 
-def test_cli_writes_result_json(tmp_path):
+def test_cli_writes_result_json(tmp_path: Path) -> None:
     input_dir = tmp_path / "input"
     files_dir = input_dir / "files"
     work_dir = tmp_path / "work"
@@ -74,7 +104,7 @@ def main(submission):
     assert result["max_score"] == 10
 
 
-def test_cli_grade_file_can_import_sibling_helper(tmp_path):
+def test_cli_grade_file_can_import_sibling_helper(tmp_path: Path) -> None:
     input_dir = tmp_path / "input"
     work_dir = tmp_path / "work"
     output_dir = tmp_path / "output"
@@ -122,7 +152,7 @@ def main(submission):
     assert result["score"] == 3
 
 
-def test_missing_main_writes_error_result(tmp_path):
+def test_missing_main_writes_error_result(tmp_path: Path) -> None:
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "output"
     grade_file = tmp_path / "grade.py"
@@ -149,7 +179,7 @@ def test_missing_main_writes_error_result(tmp_path):
     assert "main" in result["feedback"]
 
 
-def test_grader_exception_writes_error_result(tmp_path):
+def test_grader_exception_writes_error_result(tmp_path: Path) -> None:
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "output"
     grade_file = tmp_path / "grade.py"
@@ -181,7 +211,7 @@ def main(submission):
     assert "boom" in result["feedback"]
 
 
-def test_non_result_return_writes_error_result(tmp_path):
+def test_non_result_return_writes_error_result(tmp_path: Path) -> None:
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "output"
     grade_file = tmp_path / "grade.py"
@@ -213,7 +243,9 @@ def main(submission):
     assert "Result" in result["feedback"]
 
 
-def test_submission_file_resolves_inside_files_dir(tmp_path, monkeypatch):
+def test_submission_file_resolves_inside_files_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     input_dir = tmp_path / "input"
     files_dir = input_dir / "files"
     files_dir.mkdir(parents=True)
@@ -224,7 +256,9 @@ def test_submission_file_resolves_inside_files_dir(tmp_path, monkeypatch):
     assert submission.file("hello.py") == (files_dir / "hello.py").resolve()
 
 
-def test_submission_file_rejects_path_traversal(tmp_path, monkeypatch):
+def test_submission_file_rejects_path_traversal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     input_dir = tmp_path / "input"
     (input_dir / "files").mkdir(parents=True)
     monkeypatch.setenv("CMSX_INPUT_DIR", str(input_dir))
@@ -235,7 +269,9 @@ def test_submission_file_rejects_path_traversal(tmp_path, monkeypatch):
         submission.file("../secret")
 
 
-def test_submission_run_captures_output(tmp_path, monkeypatch):
+def test_submission_run_captures_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("CMSX_WORK_DIR", str(tmp_path))
     submission = Submission()
 
@@ -254,7 +290,9 @@ def test_submission_run_captures_output(tmp_path, monkeypatch):
     assert not result.timed_out
 
 
-def test_submission_run_timeout(tmp_path, monkeypatch):
+def test_submission_run_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("CMSX_WORK_DIR", str(tmp_path))
     submission = Submission()
 
@@ -268,7 +306,7 @@ def test_submission_run_timeout(tmp_path, monkeypatch):
     assert not result.ok
 
 
-def test_result_rejects_too_many_check_points():
+def test_result_rejects_too_many_check_points() -> None:
     result = Result(max_score=5)
     result.check("too much", True, points=10)
 
@@ -276,7 +314,7 @@ def test_result_rejects_too_many_check_points():
         result.to_json()
 
 
-def test_result_rejects_non_finite_max_score():
+def test_result_rejects_non_finite_max_score() -> None:
     with pytest.raises(ValueError, match="finite"):
         Result(max_score=float("nan"))
 
@@ -284,7 +322,7 @@ def test_result_rejects_non_finite_max_score():
         Result(max_score=float("inf"))
 
 
-def test_check_rejects_non_finite_points():
+def test_check_rejects_non_finite_points() -> None:
     result = Result(max_score=1)
 
     with pytest.raises(ValueError, match="finite"):
@@ -294,7 +332,7 @@ def test_check_rejects_non_finite_points():
         result.check("bad", True, points=float("inf"))
 
 
-def test_derived_status_fails_when_any_check_failed_despite_full_score():
+def test_derived_status_fails_when_any_check_failed_despite_full_score() -> None:
     result = Result(max_score=1)
     result.tests.append(
         CheckResult(
@@ -310,7 +348,7 @@ def test_derived_status_fails_when_any_check_failed_despite_full_score():
     assert encoded["status"] == "failed"
 
 
-def test_derived_status_errors_when_any_check_error():
+def test_derived_status_errors_when_any_check_error() -> None:
     result = Result(max_score=0)
     result.tests.append(
         CheckResult(

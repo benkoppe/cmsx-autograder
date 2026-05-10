@@ -1,16 +1,16 @@
 import importlib.util
 import json
+import math
 import os
 import subprocess
 import sys
 import traceback
-import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from types import ModuleType
-from typing import TypeAlias
+from typing import TypeAlias, cast
 
 JsonValue: TypeAlias = (
     None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
@@ -86,8 +86,7 @@ class Result:
     def check(
         self, name: str, passed: bool, points: float, feedback: str | None = None
     ) -> None:
-        if points < 0:
-            raise ValueError("check points must be non-negative")
+        _validate_finite_nonnegative_score(points, "check points")
 
         self.tests.append(
             CheckResult(
@@ -177,17 +176,42 @@ class Submission:
         env: Mapping[str, str] | None = None,
     ) -> CommandResult:
         run_cwd = Path(cwd) if cwd is not None else self.work_dir
+        run_env = {**os.environ, **env} if env is not None else None
 
         try:
-            completed = subprocess.run(
+            if isinstance(input, bytes):
+                completed_bytes = subprocess.run(
+                    args,
+                    input=input,
+                    cwd=run_cwd,
+                    env=run_env,
+                    capture_output=True,
+                    text=False,
+                    timeout=timeout,
+                    check=False,
+                )
+                return CommandResult(
+                    args=args,
+                    returncode=completed_bytes.returncode,
+                    stdout=_decode_output(completed_bytes.stdout),
+                    stderr=_decode_output(completed_bytes.stderr),
+                )
+
+            completed_text = subprocess.run(
                 args,
                 input=input,
                 cwd=run_cwd,
-                env={**os.environ, **env} if env is not None else None,
+                env=run_env,
                 capture_output=True,
-                text=not isinstance(input, bytes),
+                text=True,
                 timeout=timeout,
                 check=False,
+            )
+            return CommandResult(
+                args=args,
+                returncode=completed_text.returncode,
+                stdout=completed_text.stdout,
+                stderr=completed_text.stderr,
             )
         except subprocess.TimeoutExpired as exc:
             return CommandResult(
@@ -197,13 +221,6 @@ class Submission:
                 stderr=_decode_output(exc.stderr),
                 timed_out=True,
             )
-
-        return CommandResult(
-            args=args,
-            returncode=completed.returncode,
-            stdout=_decode_output(completed.stdout),
-            stderr=_decode_output(completed.stderr),
-        )
 
     def _load_metadata(self) -> JsonObject:
         metadata_path = self.input_dir / "metadata.json"
@@ -217,10 +234,10 @@ class Submission:
         if not isinstance(metadata, dict):
             raise ValueError("metadata.json must contain a JSON object")
 
-        return metadata
+        return cast(JsonObject, metadata)
 
 
-GradeFunction: TypeAlias = Callable[[Submission], Result]
+GradeFunction: TypeAlias = Callable[[Submission], object]
 
 
 def run_grade_function(fn: GradeFunction) -> Result:
@@ -244,7 +261,7 @@ def run_grade_file(path: str | Path) -> int:
         if not callable(main):
             raise TypeError(f"{grade_path} must define a callable main(submission)")
 
-        run_grade_function(main)
+        _ = run_grade_function(main)
     except Exception as exc:
         traceback.print_exc(file=sys.stderr)
         write_result(error_result(exc))

@@ -9,8 +9,13 @@ dependencies = []
 cmsx-grade = "cmsx_autograder.__main__:main"
 
 [dependency-groups]
-dev = ["pytest>=9.0"]
+dev = ["pytest>=9.0", "basedpyright>=1.38.2"]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.basedpyright]
+include = ["src", "tests"]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"

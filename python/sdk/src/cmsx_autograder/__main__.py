@@ -1,8 +1,13 @@
 import argparse
-import sys
 from pathlib import Path
+from dataclasses import dataclass
 
-from cmsx_autograder import run_grade_file
+from . import run_grade_file
+
+
+@dataclass(init=False)
+class CliArgs(argparse.Namespace):
+    grade_file: Path
 
 
 def main() -> int:
@@ -10,9 +15,9 @@ def main() -> int:
         prog="python -m cmsx_autograder",
         description="Run a CMSX Python grading script.",
     )
-    parser.add_argument("grade_file", type=Path, help="path to grade.py")
+    _ = parser.add_argument("grade_file", type=Path, help="path to grade.py")
 
-    args = parser.parse_args()
+    args = parser.parse_args(namespace=CliArgs())
     return run_grade_file(args.grade_file)
 
 
