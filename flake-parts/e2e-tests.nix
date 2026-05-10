@@ -1,10 +1,15 @@
-{ lib, ... }:
+{ lib, inputs, ... }:
 {
   perSystem =
-    { pkgs, self', ... }:
+    {
+      pkgs,
+      self',
+      ...
+    }:
     let
       controlPlane = self'.packages.cmsx-control-plane;
       worker = self'.packages.cmsx-worker;
+      runnerImage = self'.packages.cmsx-runner-python-image;
 
       serverUrl = "http://127.0.0.1:3000";
       adminToken = "e2e-admin-token";
@@ -35,95 +40,26 @@
         };
       };
 
-      mkE2eCmsxInWorker = pkgs.testers.nixosTest {
-        name = "e2e-cmsx-in-worker";
+      skopeoNix2containerNoDocs =
+        pkgs:
+        inputs.nix2container.packages.${pkgs.stdenv.hostPlatform.system}.skopeo-nix2container.overrideAttrs
+          (old: {
+            outputs = [ "out" ];
+            buildPhase =
+              builtins.replaceStrings [ "make bin/skopeo docs" ] [ "make bin/skopeo" ]
+                old.buildPhase;
+            installPhase =
+              builtins.replaceStrings [ "make install-binary install-docs" ] [ "make install-binary" ]
+                old.installPhase;
+          });
 
-        nodes.machine =
-          { pkgs, lib, ... }:
-          {
-            virtualisation.memorySize = 2048;
-
-            networking.firewall.enable = false;
-
-            environment.systemPackages = [
-              pkgs.curl
-              pkgs.jq
-              pkgs.python314
-              controlPlane
-              worker
-            ];
-
-            users = {
-              groups.cmsx-e2e = { };
-              users.cmsx-e2e = {
-                isSystemUser = true;
-                group = "cmsx-e2e";
-              };
-
-              groups.cmsx-worker = { };
-              users.cmsx-worker = {
-                isSystemUser = true;
-                group = "cmsx-worker";
-              };
-            };
-
-            services.postgresql = {
-              enable = true;
-              ensureDatabases = [ "cmsx-e2e" ];
-              ensureUsers = [
-                {
-                  name = "cmsx-e2e";
-                  ensureDBOwnership = true;
-                }
-              ];
-            };
-
-            systemd.services.cmsx-control-plane = {
-              description = "CMSX control plane e2e service";
-              wantedBy = [ "multi-user.target" ];
-              after = [
-                "postgresql.service"
-                "postgresql-setup.service"
-              ];
-              requires = [
-                "postgresql.service"
-                "postgresql-setup.service"
-              ];
-
-              environment = {
-                CMSX_CONFIG = "${controlPlaneConfig}";
-              };
-
-              serviceConfig = {
-                ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p /var/lib/cmsx-control-plane/storage";
-                ExecStart = "${lib.getExe controlPlane}";
-                User = "cmsx-e2e";
-                Group = "cmsx-e2e";
-                StateDirectory = "cmsx-control-plane";
-                Restart = "on-failure";
-              };
-            };
-
-            systemd.services.cmsx-worker = {
-              description = "CMSX worker e2e service";
-              after = [ "cmsx-control-plane.service" ];
-              requires = [ "cmsx-control-plane.service" ];
-
-              environment = {
-                CMSX_WORKER_CONFIG = "/run/cmsx-worker/e2e-worker.toml";
-              };
-
-              serviceConfig = {
-                ExecStart = "${lib.getExe worker}";
-                User = "cmsx-worker";
-                Group = "cmsx-worker";
-                StateDirectory = "cmsx-worker";
-                Restart = "on-failure";
-              };
-            };
-          };
-
-        testScript = ''
+      sharedTestScript =
+        {
+          executorConfigScript,
+          extraSetupScript ? "",
+          extraAssertionsScript ? "",
+        }:
+        /* python */ ''
           import json
           import time
           import shlex
@@ -140,6 +76,8 @@
 
           auth_header = "Authorization: Bearer ${adminToken}"
           auth_header_arg = shlex.quote(auth_header)
+
+          ${extraSetupScript}
 
           machine.succeed(textwrap.dedent("""
             cat > /tmp/create-assignment.json <<'EOF'
@@ -191,26 +129,20 @@
             test -s /tmp/worker-private-key
           """) % auth_header_arg)
 
-          machine.succeed(textwrap.dedent("""
-            mkdir -p /run/cmsx-worker
+          machine.succeed("""
+          mkdir -p /run/cmsx-worker
 
-            cat > /run/cmsx-worker/e2e-worker.toml <<EOF
-            control_plane_url = "${serverUrl}"
-            private_key_base64 = "$(cat /tmp/worker-private-key)"
-            version = "0.1.0"
+          cat > /run/cmsx-worker/e2e-worker.toml <<EOF
+          control_plane_url = "${serverUrl}"
+          private_key_base64 = "$(cat /tmp/worker-private-key)"
+          version = "0.1.0"
 
-            [executor]
-            backend = "in-worker"
-            workspace_root = "/var/lib/cmsx-worker/jobs"
-            grader_root = "${../examples/assignments}"
-            max_jobs = 1
-            keep_workspaces = false
-            python_command = "${pythonWithSdk}/bin/python3"
-            EOF
+          ${executorConfigScript}
+          EOF
 
-            chown root:root /run/cmsx-worker/e2e-worker.toml
-            chmod 0644 /run/cmsx-worker/e2e-worker.toml
-          """))
+          chown root:root /run/cmsx-worker/e2e-worker.toml
+          chmod 0644 /run/cmsx-worker/e2e-worker.toml
+          """)
 
           machine.start_job("cmsx-worker.service")
           machine.wait_for_unit("cmsx-worker.service")
@@ -218,7 +150,7 @@
           machine.wait_until_succeeds(textwrap.dedent("""
             curl -fsS -H %s ${serverUrl}/admin/workers \
               | jq -e '.[] | select(.name == "e2e-worker" and .status == "online")'
-          """) % auth_header_arg)
+          """) % auth_header_arg, timeout=60)
 
           machine.succeed(textwrap.dedent("""
             mkdir -p /tmp/cmsx-submit
@@ -312,11 +244,177 @@
             curl -fsS -H %s ${serverUrl}/assignments/hello-python/submissions \
               | jq -e '.[0].cmsx_group_id == "group-1"'
           """) % auth_header_arg)
+
+          ${extraAssertionsScript}
+        '';
+
+      mkCmsxE2e =
+        {
+          name,
+          enableDocker ? false,
+          executorConfigScript,
+          extraSystemPackages ? (pkgs: [ ]),
+          extraSetupScript ? "",
+          extraAssertionsScript ? "",
+        }:
+        pkgs.testers.nixosTest {
+          inherit name;
+
+          nodes.machine =
+            { pkgs, lib, ... }:
+            {
+              virtualisation.memorySize = 2048;
+              virtualisation.docker.enable = enableDocker;
+
+              networking.firewall.enable = false;
+
+              environment.systemPackages = [
+                pkgs.curl
+                pkgs.jq
+                pkgs.python314
+                controlPlane
+                worker
+              ]
+              ++ (extraSystemPackages pkgs);
+
+              users = {
+                groups.cmsx-e2e = { };
+                users.cmsx-e2e = {
+                  isSystemUser = true;
+                  group = "cmsx-e2e";
+                };
+
+                groups.cmsx-worker = { };
+                users.cmsx-worker = {
+                  isSystemUser = true;
+                  group = "cmsx-worker";
+                  extraGroups = lib.optional enableDocker "docker";
+                };
+              };
+
+              services.postgresql = {
+                enable = true;
+                ensureDatabases = [ "cmsx-e2e" ];
+                ensureUsers = [
+                  {
+                    name = "cmsx-e2e";
+                    ensureDBOwnership = true;
+                  }
+                ];
+              };
+
+              systemd.services.cmsx-control-plane = {
+                description = "CMSX control plane e2e service";
+                wantedBy = [ "multi-user.target" ];
+                after = [
+                  "postgresql.service"
+                  "postgresql-setup.service"
+                ];
+                requires = [
+                  "postgresql.service"
+                  "postgresql-setup.service"
+                ];
+
+                environment = {
+                  CMSX_CONFIG = "${controlPlaneConfig}";
+                };
+
+                serviceConfig = {
+                  ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p /var/lib/cmsx-control-plane/storage";
+                  ExecStart = "${lib.getExe controlPlane}";
+                  User = "cmsx-e2e";
+                  Group = "cmsx-e2e";
+                  StateDirectory = "cmsx-control-plane";
+                  Restart = "no";
+                };
+              };
+
+              systemd.services.cmsx-worker = {
+                description = "CMSX worker e2e service";
+                after = [ "cmsx-control-plane.service" ] ++ lib.optional enableDocker "docker.service";
+                requires = [ "cmsx-control-plane.service" ] ++ lib.optional enableDocker "docker.service";
+
+                environment = {
+                  CMSX_WORKER_CONFIG = "/run/cmsx-worker/e2e-worker.toml";
+                };
+
+                serviceConfig = {
+                  ExecStart = "${lib.getExe worker}";
+                  User = "cmsx-worker";
+                  Group = "cmsx-worker";
+                  StateDirectory = "cmsx-worker";
+                  Restart = "no";
+                };
+              };
+            };
+
+          testScript = sharedTestScript {
+            inherit executorConfigScript extraSetupScript extraAssertionsScript;
+          };
+        };
+
+      e2eCmsxInWorker = mkCmsxE2e {
+        name = "e2e-cmsx-in-worker";
+
+        executorConfigScript = ''
+          [executor]
+          backend = "in-worker"
+          workspace_root = "/var/lib/cmsx-worker/jobs"
+          grader_root = "${../examples/assignments}"
+          max_jobs = 1
+          keep_workspaces = false
+          python_command = "${pythonWithSdk}/bin/python3"
+        '';
+      };
+
+      mkE2eCmsxDockerSocket = mkCmsxE2e {
+        name = "e2e-cmsx-docker-socket";
+        enableDocker = true;
+
+        extraSystemPackages = pkgs: [
+          (skopeoNix2containerNoDocs pkgs)
+          pkgs.docker-client
+        ];
+
+        executorConfigScript = ''
+          [executor]
+          backend = "docker-socket"
+          workspace_root = "/var/lib/cmsx-worker/jobs"
+          grader_root = "${../examples/assignments}"
+          max_jobs = 1
+          keep_workspaces = false
+          docker_host = "unix:///var/run/docker.sock"
+          default_image = "cmsx-runner-python:latest"
+          default_timeout_seconds = 60
+          default_memory_mb = 512
+          default_cpus = 1
+          default_pids_limit = 128
+          default_network = false
+        '';
+
+        extraSetupScript = ''
+          machine.wait_for_unit("docker.service")
+          machine.succeed(textwrap.dedent("""
+            skopeo --insecure-policy copy \
+              nix:${runnerImage} \
+              docker-daemon:cmsx-runner-python:latest
+            docker image inspect cmsx-runner-python:latest >/dev/null
+          """))
+        '';
+
+        extraAssertionsScript = ''
+          assert "executor.container.created" in event_types, event_types
+          assert "executor.container.started" in event_types, event_types
+
+          machine.wait_until_succeeds(
+              "test -z \"$(docker ps -aq --filter 'name=cmsx-job-')\""
+          )
         '';
       };
 
       e2eChecks = lib.optionalAttrs pkgs.stdenv.isLinux {
-        e2e-cmsx-in-worker = mkE2eCmsxInWorker;
+        e2e-cmsx-in-worker = e2eCmsxInWorker;
+        e2e-cmsx-docker-socket = mkE2eCmsxDockerSocket;
       };
     in
     {
