@@ -560,9 +560,29 @@ pub async fn read_bounded_result_json(
         });
     }
 
-    let bytes = tokio_fs::read(result_path)
+    let mut file = tokio_fs::File::open(result_path)
         .await
         .map_err(ResultReadError::Io)?;
+
+    let mut bytes = Vec::with_capacity(len as usize);
+    let mut buffer = [0_u8; 8192];
+
+    loop {
+        let read = file.read(&mut buffer).await.map_err(ResultReadError::Io)?;
+
+        if read == 0 {
+            break;
+        }
+
+        bytes.extend_from_slice(&buffer[..read]);
+
+        if bytes.len() as u64 > RESULT_JSON_MAX_BYTES {
+            return Err(ResultReadError::TooLarge {
+                max: RESULT_JSON_MAX_BYTES,
+                actual: bytes.len() as u64,
+            });
+        }
+    }
 
     serde_json::from_slice(&bytes).map_err(ResultReadError::InvalidJson)
 }

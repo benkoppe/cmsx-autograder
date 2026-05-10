@@ -24,7 +24,8 @@ use cmsx_core::{
         JOB_EVENT_BATCH_MAX_EVENTS, JOB_EVENT_MESSAGE_MAX_BYTES, JOB_FAILURE_REASON_MAX_BYTES,
         JOB_LEASE_SECONDS, JobEventStream, JobEventVisibility, MAX_CLAIM_WAIT_SECONDS,
         WORKER_AUTH_SCHEME, WORKER_JWT_AUDIENCE, WORKER_JWT_MAX_VALIDITY_SECONDS,
-        WORKER_JWT_TIME_TOLERANCE_SECONDS, WORKER_REQUEST_NONCE_RETENTION_SECONDS,
+        WORKER_JWT_TIME_TOLERANCE_SECONDS, WORKER_MAX_ACTIVE_JOBS, WORKER_MAX_CLAIM_JOBS,
+        WORKER_REQUEST_NONCE_RETENTION_SECONDS,
     },
 };
 
@@ -640,6 +641,7 @@ async fn load_owned_job(
 ) -> Result<ClaimedJob, ApiError> {
     let claimed = JobStatus::Claimed.as_str();
     let running = JobStatus::Running.as_str();
+    let now = Utc::now();
 
     let row = sqlx::query!(
         r#"
@@ -660,11 +662,13 @@ async fn load_owned_job(
         WHERE grading_jobs.id = $1
           AND grading_jobs.worker_id = $2
           AND grading_jobs.status IN ($3, $4)
+          AND grading_jobs.lease_expires_at > $5
         "#,
         job_id,
         worker_id,
         claimed,
-        running
+        running,
+        now
     )
     .fetch_optional(&state.db)
     .await
@@ -786,7 +790,7 @@ pub async fn get_job_file(
 
     let file = sqlx::query!(
         r#"
-        SELECT submission_files.storage_path, submission_files.original_filename
+        SELECT submission_files.storage_path, submission_files.safe_filename
         FROM grading_jobs
         JOIN submission_files ON submission_files.submission_id = grading_jobs.submission_id
         WHERE grading_jobs.id = $1
@@ -817,10 +821,7 @@ pub async fn get_job_file(
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(
             header::CONTENT_DISPOSITION,
-            format!(
-                "attachment; filename=\"{}\"",
-                file.original_filename.replace('"', "")
-            ),
+            format!("attachment; filename=\"{}\"", file.safe_filename),
         )
         .body(Body::from(bytes))
         .map_err(ApiError::internal)?;
@@ -890,6 +891,32 @@ pub async fn post_result(
     let feedback = value.result.feedback.clone();
 
     let mut tx = state.db.begin().await.map_err(ApiError::internal)?;
+
+    let assignment_max_score = sqlx::query_scalar!(
+        r#"
+        SELECT assignments.max_score
+        FROM grading_jobs
+        JOIN assignments ON assignments.id = grading_jobs.assignment_id
+        WHERE grading_jobs.id = $1
+        "#,
+        job_id
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(ApiError::internal)?
+    .ok_or_else(|| ApiError::not_found("active job not found"))?;
+
+    if value.result.max_score > assignment_max_score {
+        return Err(ApiError::bad_request(
+            "result max_score must not exceed assignment max_score",
+        ));
+    }
+
+    if value.result.score > assignment_max_score {
+        return Err(ApiError::bad_request(
+            "result score must not exceed assignment max_score",
+        ));
+    }
 
     let is_cancelled_result = matches!(value.result.status, ResultStatus::Cancelled);
     let claimed = JobStatus::Claimed.as_str();
@@ -1143,6 +1170,11 @@ fn validate_heartbeat_request(value: &WorkerHeartbeatRequest) -> Result<(), ApiE
     if value.max_jobs < 0 {
         return Err(ApiError::bad_request("max_jobs must be nonnegative"));
     }
+    if value.max_jobs as usize > WORKER_MAX_ACTIVE_JOBS {
+        return Err(ApiError::bad_request(format!(
+            "max_jobs must be <= {WORKER_MAX_ACTIVE_JOBS}"
+        )));
+    }
     if value.running_jobs > value.max_jobs {
         return Err(ApiError::bad_request(
             "running_jobs must not exceed max_jobs",
@@ -1153,6 +1185,11 @@ fn validate_heartbeat_request(value: &WorkerHeartbeatRequest) -> Result<(), ApiE
             "active_job_ids length must not exceed max_jobs",
         ));
     }
+    if value.active_job_ids.len() > WORKER_MAX_ACTIVE_JOBS {
+        return Err(ApiError::bad_request(format!(
+            "active_job_ids length must be <= {WORKER_MAX_ACTIVE_JOBS}"
+        )));
+    }
 
     Ok(())
 }
@@ -1160,6 +1197,11 @@ fn validate_heartbeat_request(value: &WorkerHeartbeatRequest) -> Result<(), ApiE
 fn validate_claim_request(value: &ClaimJobRequest) -> Result<(), ApiError> {
     if value.available_slots < 0 {
         return Err(ApiError::bad_request("available_slots must be nonnegative"));
+    }
+    if value.available_slots > WORKER_MAX_CLAIM_JOBS {
+        return Err(ApiError::bad_request(format!(
+            "available_slots must be <= {WORKER_MAX_CLAIM_JOBS}"
+        )));
     }
     if value.wait_seconds.unwrap_or(0) > MAX_CLAIM_WAIT_SECONDS {
         return Err(ApiError::bad_request(format!(

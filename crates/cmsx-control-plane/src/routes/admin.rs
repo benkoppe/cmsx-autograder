@@ -877,20 +877,38 @@ fn worker_config_response(state: &AppState, private_key_base64: &str) -> WorkerC
     }
 }
 
+#[derive(serde::Serialize)]
+struct WorkerConfigToml<'a> {
+    control_plane_url: &'a str,
+    private_key_base64: &'a str,
+    version: &'a str,
+    executor: WorkerExecutorConfigToml,
+}
+
+#[derive(serde::Serialize)]
+struct WorkerExecutorConfigToml {
+    backend: &'static str,
+    workspace_root: &'static str,
+    grader_root: &'static str,
+    keep_workspaces: bool,
+    python_command: &'static str,
+}
+
 fn worker_config_toml(config: &WorkerConfigResponse) -> String {
-    format!(
-        r#"control_plane_url = "{}"
-private_key_base64 = "{}"
-version = "{}"
-[executor]
-backend = "in-worker"
-workspace_root = "data/worker"
-grader_root = "examples/assignments"
-keep_workspaces = false
-python_command = "python3"
-"#,
-        config.control_plane_url, config.private_key_base64, config.version
-    )
+    let toml_config = WorkerConfigToml {
+        control_plane_url: &config.control_plane_url,
+        private_key_base64: &config.private_key_base64,
+        version: &config.version,
+        executor: WorkerExecutorConfigToml {
+            backend: "in-worker",
+            workspace_root: "data/worker",
+            grader_root: "examples/assignments",
+            keep_workspaces: false,
+            python_command: "python3",
+        },
+    };
+
+    toml::to_string(&toml_config).expect("worker config TOML should serialize")
 }
 
 fn assignment_response(row: AssignmentRow) -> AssignmentResponse {

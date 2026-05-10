@@ -6,6 +6,7 @@ use figment::{
     providers::{Env, Format, Serialized, Toml},
 };
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 const KIB: usize = 1024;
 const GIB: usize = 1024 * 1024 * 1024;
@@ -134,8 +135,21 @@ impl Config {
 
 impl AdminConfig {
     fn validate(&self) -> Result<()> {
-        if self.public_url.trim().is_empty() {
+        let public_url = self.public_url.trim();
+
+        if public_url.is_empty() {
             bail!("admin.public_url must not be empty");
+        }
+
+        let parsed = Url::parse(public_url).context("admin.public_url must be a valid URL")?;
+
+        match parsed.scheme() {
+            "http" | "https" => {}
+            _ => bail!("admin.public_url must use http or https"),
+        }
+
+        if parsed.host_str().is_none() {
+            bail!("admin.public_url must include a host");
         }
 
         Ok(())

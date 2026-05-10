@@ -90,6 +90,7 @@ impl InWorkerExecutor {
         let status = tokio::select! {
             result = child.wait() => {
                 let status = result.context("failed waiting for child process")?;
+                cleanup_process_group_after_exit(&child);
                 ExecutionStatus::Exited { code: status.code() }
             }
             _ = tokio::time::sleep(Duration::from_secs(timeout_seconds)) => {
@@ -115,34 +116,46 @@ impl InWorkerExecutor {
 }
 
 async fn kill_and_reap(child: &mut tokio::process::Child) {
-    kill_process_group(child).await;
+    if !kill_process_group(child.id())
+        && let Err(error) = child.kill().await
+    {
+        tracing::warn!(?error, "failed to kill child process");
+    }
 
     if let Err(error) = child.wait().await {
         tracing::warn!(?error, "failed to reap child process");
     }
 }
 
-async fn kill_process_group(child: &mut tokio::process::Child) {
-    let Some(pid) = child.id() else {
-        return;
+fn cleanup_process_group_after_exit(child: &tokio::process::Child) {
+    kill_process_group(child.id());
+}
+
+fn kill_process_group(pid: Option<u32>) -> bool {
+    let Some(pid) = pid else {
+        return true;
     };
 
     let process_group_id = -(pid as libc::pid_t);
     let result = unsafe { libc::kill(process_group_id, libc::SIGKILL) };
 
-    if result == -1 {
-        let error = std::io::Error::last_os_error();
-
-        tracing::warn!(
-            ?error,
-            pid,
-            "failed to kill child process group; falling back to direct child kill"
-        );
-
-        if let Err(error) = child.kill().await {
-            tracing::warn!(?error, "failed to kill child process");
-        }
+    if result == 0 {
+        return true;
     }
+
+    let error = std::io::Error::last_os_error();
+
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return true;
+    }
+
+    tracing::warn!(
+        ?error,
+        pid,
+        "failed to kill child process group; falling back to direct child kill"
+    );
+
+    false
 }
 
 async fn join_summary(task: JoinHandle<Option<String>>) -> Option<String> {

@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import traceback
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -37,6 +38,13 @@ class CommandResult:
         return self.returncode == 0 and not self.timed_out
 
 
+def _validate_finite_nonnegative_score(value: float, field_name: str) -> None:
+    if not math.isfinite(value):
+        raise ValueError(f"{field_name} must be finite")
+    if value < 0:
+        raise ValueError(f"{field_name} must be non-negative")
+
+
 @dataclass
 class CheckResult:
     name: str
@@ -48,10 +56,10 @@ class CheckResult:
     def __post_init__(self) -> None:
         if not self.name.strip():
             raise ValueError("check name must not be empty")
-        if self.score < 0:
-            raise ValueError("check score must be non-negative")
-        if self.max_score < 0:
-            raise ValueError("check max_score must be non-negative")
+
+        _validate_finite_nonnegative_score(self.score, "check score")
+        _validate_finite_nonnegative_score(self.max_score, "check max_score")
+
         if self.score > self.max_score:
             raise ValueError("check score must not exceed max_score")
 
@@ -73,8 +81,7 @@ class Result:
     status: Status | None = None
 
     def __post_init__(self) -> None:
-        if self.max_score < 0:
-            raise ValueError("max_score must be non-negative")
+        _validate_finite_nonnegative_score(self.max_score, "max_score")
 
     def check(
         self, name: str, passed: bool, points: float, feedback: str | None = None
@@ -101,9 +108,7 @@ class Result:
         if total_check_points > self.max_score:
             raise ValueError("total check points must not exceed max_score")
 
-        status = self.status
-        if status is None:
-            status = Status.PASSED if score == self.max_score else Status.FAILED
+        status = self.status if self.status is not None else self._derived_status(score)
 
         return {
             "schema_version": "1",
@@ -114,6 +119,20 @@ class Result:
             "tests": [test.to_json() for test in self.tests],
             "artifacts": [],
         }
+
+    def _derived_status(self, score: float) -> Status:
+        statuses = {test.status for test in self.tests}
+
+        if Status.ERROR in statuses:
+            return Status.ERROR
+        if Status.CANCELLED in statuses:
+            return Status.CANCELLED
+        if Status.FAILED in statuses:
+            return Status.FAILED
+        if score == self.max_score:
+            return Status.PASSED
+
+        return Status.FAILED
 
 
 class Submission:
@@ -240,7 +259,7 @@ def write_result(result: Result) -> None:
     (output_dir / "artifacts").mkdir(parents=True, exist_ok=True)
 
     with (output_dir / "result.json").open("w", encoding="utf-8") as f:
-        json.dump(result.to_json(), f, indent=2)
+        json.dump(result.to_json(), f, indent=2, allow_nan=False)
 
 
 def error_result(exc: BaseException) -> Result:
@@ -255,13 +274,24 @@ def _load_grade_module(path: Path) -> ModuleType:
     if not path.exists():
         raise FileNotFoundError(path)
 
+    grade_dir = str(path.parent.resolve())
+
     spec = importlib.util.spec_from_file_location("cmsx_grade", path)
     if spec is None or spec.loader is None:
         raise ImportError(f"could not load grade file: {path}")
 
     module = importlib.util.module_from_spec(spec)
     sys.modules["cmsx_grade"] = module
-    spec.loader.exec_module(module)
+
+    sys.path.insert(0, grade_dir)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        try:
+            sys.path.remove(grade_dir)
+        except ValueError:
+            pass
+
     return module
 
 
