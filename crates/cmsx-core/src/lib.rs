@@ -56,6 +56,22 @@ impl JobStatus {
     }
 }
 
+impl std::str::FromStr for JobStatus {
+    type Err = ();
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "queued" => Ok(Self::Queued),
+            "claimed" => Ok(Self::Claimed),
+            "running" => Ok(Self::Running),
+            "succeeded" => Ok(Self::Succeeded),
+            "failed" => Ok(Self::Failed),
+            "error" => Ok(Self::Error),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobEvent {
     pub job_id: Uuid,
@@ -77,6 +93,20 @@ pub struct GradingResult {
     pub feedback: Option<String>,
     pub tests: Vec<TestResult>,
     pub artifacts: Vec<String>,
+}
+
+impl GradingResult {
+    pub fn cancelled() -> Self {
+        Self {
+            schema_version: protocol::GRADING_RESULT_SCHEMA_VERSION.to_string(),
+            status: ResultStatus::Cancelled,
+            score: 0.0,
+            max_score: 0.0,
+            feedback: Some("Job cancelled".to_string()),
+            tests: Vec::new(),
+            artifacts: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

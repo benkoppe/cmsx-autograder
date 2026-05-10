@@ -25,6 +25,7 @@ futures-util = "0.3"
 http-body-util = "0.1"
 indoc = "2"
 jwt-simple = "0.12"
+libc = "0.2"
 object_store = { version = "0.13", features = ["aws"] }
 predicates = "3"
 reqwest = { version = "0.13", features = [

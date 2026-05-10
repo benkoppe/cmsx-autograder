@@ -1,3 +1,6 @@
+#[cfg(not(unix))]
+compile_error!("InWorkerExecutor currently requires a Unix platform");
+
 use std::{process::Stdio, time::Instant};
 
 use anyhow::{Context, Result};
@@ -43,7 +46,9 @@ impl InWorkerExecutor {
         let timeout_seconds = parse_timeout_seconds(&job.execution_config);
         let started = Instant::now();
 
-        let mut child = Command::new(&self.python_command)
+        let mut command = Command::new(&self.python_command);
+
+        command
             .arg("-m")
             .arg("cmsx_autograder")
             .arg(workspace.grader_dir.join("grade.py"))
@@ -52,7 +57,19 @@ impl InWorkerExecutor {
             .env("CMSX_WORK_DIR", &workspace.work_dir)
             .env("CMSX_OUTPUT_DIR", &workspace.output_dir)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+
+                Ok(())
+            });
+        }
+
+        let mut child = command
             .spawn()
             .with_context(|| format!("failed to spawn {}", self.python_command))?;
 
@@ -94,12 +111,33 @@ impl InWorkerExecutor {
 }
 
 async fn kill_and_reap(child: &mut tokio::process::Child) {
-    if let Err(error) = child.kill().await {
-        tracing::warn!(?error, "failed to kill child process");
-    }
+    kill_process_group(child).await;
 
     if let Err(error) = child.wait().await {
         tracing::warn!(?error, "failed to reap child process");
+    }
+}
+
+async fn kill_process_group(child: &mut tokio::process::Child) {
+    let Some(pid) = child.id() else {
+        return;
+    };
+
+    let process_group_id = -(pid as libc::pid_t);
+    let result = unsafe { libc::kill(process_group_id, libc::SIGKILL) };
+
+    if result == -1 {
+        let error = std::io::Error::last_os_error();
+
+        tracing::warn!(
+            ?error,
+            pid,
+            "failed to kill child process group; falling back to direct child kill"
+        );
+
+        if let Err(error) = child.kill().await {
+            tracing::warn!(?error, "failed to kill child process");
+        }
     }
 }
 
