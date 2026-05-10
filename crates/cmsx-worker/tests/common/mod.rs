@@ -8,7 +8,10 @@ use tempfile::{Builder, TempDir};
 use uuid::Uuid;
 
 use cmsx_core::{ClaimedJob, GradingResult, ResultStatus};
-use cmsx_worker::workspace::{JobWorkspace, set_runtime_workspace_permissions};
+use cmsx_worker::{
+    job_contract,
+    workspace::{JobWorkspace, set_runtime_workspace_permissions},
+};
 
 pub struct ExecutorFixture {
     _temp: TempDir,
@@ -30,16 +33,18 @@ impl ExecutorFixture {
             .expect("failed to create temp dir");
 
         let root = temp.path().join("job");
+        let input_dir = root.join(job_contract::INPUT_DIR);
+        let output_dir = root.join(job_contract::OUTPUT_DIR);
 
         let workspace = JobWorkspace {
             root: root.clone(),
-            input_dir: root.join("input"),
-            files_dir: root.join("input/files"),
-            grader_dir: root.join("grader"),
-            work_dir: root.join("work"),
-            output_dir: root.join("output"),
-            artifacts_dir: root.join("output/artifacts"),
-            result_path: root.join("output/result.json"),
+            input_dir: input_dir.clone(),
+            files_dir: input_dir.join(job_contract::FILES_DIR),
+            grader_dir: root.join(job_contract::GRADER_DIR),
+            work_dir: root.join(job_contract::WORK_DIR),
+            artifacts_dir: output_dir.join(job_contract::ARTIFACTS_DIR),
+            result_path: output_dir.join(job_contract::RESULT_JSON),
+            output_dir,
         };
 
         fs::create_dir_all(&workspace.files_dir).expect("failed to create input files dir");
@@ -78,13 +83,16 @@ impl ExecutorFixture {
     }
 
     pub fn write_grade_py(&self, contents: &str) {
-        fs::write(self.workspace.grader_dir.join("grade.py"), contents)
-            .expect("failed to write grade.py");
+        fs::write(
+            self.workspace.grader_dir.join(job_contract::GRADE_PY),
+            contents,
+        )
+        .expect("failed to write grade.py");
     }
 
     pub fn write_metadata(&self, value: Value) {
         fs::write(
-            self.workspace.input_dir.join("metadata.json"),
+            self.workspace.input_dir.join(job_contract::METADATA_JSON),
             serde_json::to_vec_pretty(&value).expect("failed to encode metadata"),
         )
         .expect("failed to write metadata");

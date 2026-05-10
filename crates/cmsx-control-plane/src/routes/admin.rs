@@ -16,7 +16,10 @@ use serde_json::{Value, json};
 use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
-use cmsx_core::WorkerStatus;
+use cmsx_core::{
+    WorkerStatus,
+    protocol::{ASSIGNMENT_NAME_MAX_BYTES, ASSIGNMENT_SLUG_MAX_BYTES, WORKER_NAME_MAX_BYTES},
+};
 
 use crate::{app::AppState, db, error::ApiError, workers};
 
@@ -755,8 +758,10 @@ fn validate_assignment_update(value: &UpdateAssignmentRequest) -> Result<(), Api
 }
 
 fn validate_slug(slug: &str) -> Result<(), ApiError> {
-    if slug.is_empty() || slug.len() > 128 {
-        return Err(ApiError::bad_request("slug must be 1-128 characters"));
+    if slug.is_empty() || slug.len() > ASSIGNMENT_SLUG_MAX_BYTES {
+        return Err(ApiError::bad_request(format!(
+            "slug must be 1-{ASSIGNMENT_SLUG_MAX_BYTES} characters"
+        )));
     }
 
     if !slug
@@ -776,10 +781,10 @@ fn validate_slug(slug: &str) -> Result<(), ApiError> {
 }
 
 fn validate_assignment_name(name: &str) -> Result<(), ApiError> {
-    if name.trim().is_empty() || name.len() > 256 {
-        return Err(ApiError::bad_request(
-            "assignment name must be 1-256 characters",
-        ));
+    if name.trim().is_empty() || name.len() > ASSIGNMENT_NAME_MAX_BYTES {
+        return Err(ApiError::bad_request(format!(
+            "assignment name must be 1-{ASSIGNMENT_NAME_MAX_BYTES} characters"
+        )));
     }
 
     Ok(())
@@ -804,10 +809,10 @@ fn validate_json_object(value: &Value, field: &str) -> Result<(), ApiError> {
 }
 
 fn validate_worker_name(name: &str) -> Result<(), ApiError> {
-    if name.trim().is_empty() || name.len() > 128 {
-        return Err(ApiError::bad_request(
-            "worker name must be 1-128 characters",
-        ));
+    if name.trim().is_empty() || name.len() > WORKER_NAME_MAX_BYTES {
+        return Err(ApiError::bad_request(format!(
+            "worker name must be 1-{WORKER_NAME_MAX_BYTES} characters"
+        )));
     }
 
     Ok(())
@@ -921,7 +926,7 @@ mod tests {
 
     use cmsx_core::{
         ClaimJobRequest, JobEventBatchRequest, JobStatus, ResultStatus, WorkerHeartbeatRequest,
-        WorkerStatus,
+        WorkerStatus, protocol::JOB_LEASE_SECONDS,
     };
 
     use crate::test_support;
@@ -1172,7 +1177,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK, "body={json}");
         assert_eq!(json["worker_id"], worker_json["worker_id"]);
-        assert_eq!(json["lease_seconds"], 60);
+        assert_eq!(json["lease_seconds"], JOB_LEASE_SECONDS);
     }
 
     #[tokio::test]

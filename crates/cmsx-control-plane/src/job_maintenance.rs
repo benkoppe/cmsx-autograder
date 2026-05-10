@@ -3,11 +3,12 @@ use sqlx::{PgPool, Postgres, Transaction};
 use tokio::time::{Duration, MissedTickBehavior};
 use uuid::Uuid;
 
-use cmsx_core::{GradingResult, JobStatus};
+use cmsx_core::{
+    GradingResult, JobStatus,
+    protocol::{JOB_SWEEP_INTERVAL_SECONDS, failure_reason},
+};
 
 use crate::error::ApiError;
-
-const JOB_SWEEP_INTERVAL_SECONDS: u64 = 5;
 
 pub fn spawn_job_sweeper(db: PgPool) {
     tokio::spawn(async move {
@@ -103,7 +104,7 @@ async fn mark_exhausted_expired_jobs(
         SET status = $2,
             finished_at = $1,
             lease_expires_at = NULL,
-            failure_reason = 'lease_expired',
+            failure_reason = $5,
             failure_message = 'job lease expired and max attempts were exhausted',
             failure_retryable = false
         WHERE status IN ($3, $4)
@@ -114,7 +115,8 @@ async fn mark_exhausted_expired_jobs(
         now,
         error,
         claimed,
-        running
+        running,
+        failure_reason::LEASE_EXPIRED
     )
     .execute(&mut **tx)
     .await

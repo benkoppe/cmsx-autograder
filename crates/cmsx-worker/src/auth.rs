@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 
 use cmsx_core::{
     WorkerAuthClaims,
-    protocol::{WORKER_AUTH_SCHEME, WORKER_JWT_AUDIENCE},
+    protocol::{WORKER_AUTH_SCHEME, WORKER_JWT_AUDIENCE, WORKER_JWT_VALIDITY_SECONDS},
 };
 
 #[derive(Clone)]
@@ -41,11 +41,13 @@ impl WorkerSigner {
             body_sha256,
         };
 
-        let claims =
-            Claims::with_custom_claims(custom, jwt_simple::prelude::Duration::from_secs(30))
-                .with_audience(WORKER_JWT_AUDIENCE)
-                .with_issuer(issuer)
-                .with_jwt_id(jti.to_string());
+        let claims = Claims::with_custom_claims(
+            custom,
+            jwt_simple::prelude::Duration::from_secs(WORKER_JWT_VALIDITY_SECONDS),
+        )
+        .with_audience(WORKER_JWT_AUDIENCE)
+        .with_issuer(issuer)
+        .with_jwt_id(jti.to_string());
 
         let token = self.key.sign(claims).context("failed to sign worker jwt")?;
         Ok(format!("{WORKER_AUTH_SCHEME} {token}"))

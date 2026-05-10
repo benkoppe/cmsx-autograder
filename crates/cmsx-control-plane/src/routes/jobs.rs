@@ -10,7 +10,7 @@ use serde_json::Value;
 use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
-use cmsx_core::JobStatus;
+use cmsx_core::{JobStatus, protocol::JOB_LEASE_SECONDS};
 
 use crate::{
     app::AppState,
@@ -21,7 +21,7 @@ use crate::{
 
 const DEFAULT_EVENT_LIMIT: i64 = 500;
 const MAX_EVENT_LIMIT: i64 = 1000;
-const CANCELLATION_LEASE_GRACE_SECONDS: i64 = 60;
+const CANCELLATION_LEASE_GRACE_SECONDS: i64 = JOB_LEASE_SECONDS;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -363,7 +363,7 @@ mod tests {
 
     use cmsx_core::{
         GradingResult, JobResultRequest, JobStatus, ResultStatus, WorkerHeartbeatRequest,
-        WorkerStatus,
+        WorkerStatus, protocol::failure_reason,
     };
 
     use crate::test_support;
@@ -947,7 +947,7 @@ mod tests {
             &setup.private_key,
             &format!("/workers/jobs/{}/failed", setup.job_id),
             &cmsx_core::JobFailureRequest {
-                reason: "executor_error".to_string(),
+                reason: failure_reason::EXECUTOR_ERROR.to_string(),
                 message: "simulated worker failure".to_string(),
                 retryable: false,
             },

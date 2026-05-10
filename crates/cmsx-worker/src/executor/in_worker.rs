@@ -21,8 +21,12 @@ use crate::{
         ExecutionOutput, ExecutionStatus,
         utils::{BoundedSummary, parse_timeout_seconds},
     },
+    job_contract,
     workspace::JobWorkspace,
 };
+
+const OUTPUT_READER_JOIN_TIMEOUT_SECONDS: u64 = 2;
+const OUTPUT_READ_BUFFER_BYTES: usize = 8 * 1024;
 
 #[derive(Clone)]
 pub struct InWorkerExecutor {
@@ -50,12 +54,12 @@ impl InWorkerExecutor {
 
         command
             .arg("-m")
-            .arg("cmsx_autograder")
-            .arg(workspace.grader_dir.join("grade.py"))
+            .arg(job_contract::SDK_MODULE)
+            .arg(workspace.grader_dir.join(job_contract::GRADE_PY))
             .current_dir(&workspace.work_dir)
-            .env("CMSX_INPUT_DIR", &workspace.input_dir)
-            .env("CMSX_WORK_DIR", &workspace.work_dir)
-            .env("CMSX_OUTPUT_DIR", &workspace.output_dir)
+            .env(job_contract::ENV_INPUT_DIR, &workspace.input_dir)
+            .env(job_contract::ENV_WORK_DIR, &workspace.work_dir)
+            .env(job_contract::ENV_OUTPUT_DIR, &workspace.output_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -142,7 +146,12 @@ async fn kill_process_group(child: &mut tokio::process::Child) {
 }
 
 async fn join_summary(task: JoinHandle<Option<String>>) -> Option<String> {
-    match timeout(Duration::from_secs(2), task).await {
+    match timeout(
+        Duration::from_secs(OUTPUT_READER_JOIN_TIMEOUT_SECONDS),
+        task,
+    )
+    .await
+    {
         Ok(Ok(summary)) => summary,
         Ok(Err(error)) => {
             tracing::warn!(?error, "output reader task failed");
@@ -179,7 +188,7 @@ where
     R: AsyncRead + Unpin,
 {
     let mut summary = BoundedSummary::default();
-    let mut buffer = [0_u8; 8192];
+    let mut buffer = [0_u8; OUTPUT_READ_BUFFER_BYTES];
 
     loop {
         match reader.read(&mut buffer).await {
@@ -238,20 +247,30 @@ mod tests {
 
         let workspace = JobWorkspace {
             root: root.clone(),
-            input_dir: root.join("input"),
-            files_dir: root.join("input/files"),
-            grader_dir: root.join("grader"),
-            work_dir: root.join("work"),
-            output_dir: root.join("output"),
-            artifacts_dir: root.join("output/artifacts"),
-            result_path: root.join("output/result.json"),
+            input_dir: root.join(job_contract::INPUT_DIR),
+            files_dir: root
+                .join(job_contract::INPUT_DIR)
+                .join(job_contract::FILES_DIR),
+            grader_dir: root.join(job_contract::GRADER_DIR),
+            work_dir: root.join(job_contract::WORK_DIR),
+            output_dir: root.join(job_contract::OUTPUT_DIR),
+            artifacts_dir: root
+                .join(job_contract::OUTPUT_DIR)
+                .join(job_contract::ARTIFACTS_DIR),
+            result_path: root
+                .join(job_contract::OUTPUT_DIR)
+                .join(job_contract::RESULT_JSON),
         };
 
         fs::create_dir_all(&workspace.files_dir).unwrap();
         fs::create_dir_all(&workspace.grader_dir).unwrap();
         fs::create_dir_all(&workspace.work_dir).unwrap();
         fs::create_dir_all(&workspace.artifacts_dir).unwrap();
-        fs::write(workspace.grader_dir.join("grade.py"), "print('unused')").unwrap();
+        fs::write(
+            workspace.grader_dir.join(job_contract::GRADE_PY),
+            "print('unused')",
+        )
+        .unwrap();
 
         workspace
     }

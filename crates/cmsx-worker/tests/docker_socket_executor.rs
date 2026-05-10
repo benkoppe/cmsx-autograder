@@ -11,6 +11,7 @@ use cmsx_worker::{
     config::DockerSocketExecutorConfig,
     events::ExecutorEventSink,
     executor::{DockerSocketExecutor, ExecutionStatus, docker_socket::container_name},
+    job_contract,
 };
 
 use common::ExecutorFixture;
@@ -108,21 +109,25 @@ async fn executor_sets_expected_environment_and_cwd() {
     require_runner_image(&docker_config(&fixture).default_image).await;
 
     fixture.write_metadata(json!({}));
-    fixture.write_grade_py(indoc! {r#"
-        import os
-        from pathlib import Path
-        from cmsx_autograder import Result
-        def main(submission):
-            result = Result(max_score=4)
-            input_dir = Path(os.environ["CMSX_INPUT_DIR"]).resolve()
-            work_dir = Path(os.environ["CMSX_WORK_DIR"]).resolve()
-            output_dir = Path(os.environ["CMSX_OUTPUT_DIR"]).resolve()
-            result.check("input env", input_dir == submission.input_dir.resolve(), points=1)
-            result.check("work env", work_dir == submission.work_dir.resolve(), points=1)
-            result.check("output env", output_dir == submission.output_dir.resolve(), points=1)
-            result.check("cwd is work dir", Path.cwd().resolve() == work_dir, points=1)
-            return result
-    "#});
+    fixture.write_grade_py(&format!(
+        r#"import os
+from pathlib import Path
+from cmsx_autograder import Result
+def main(submission):
+    result = Result(max_score=4)
+    input_dir = Path(os.environ["{input_env}"]).resolve()
+    work_dir = Path(os.environ["{work_env}"]).resolve()
+    output_dir = Path(os.environ["{output_env}"]).resolve()
+    result.check("input env", input_dir == submission.input_dir.resolve(), points=1)
+    result.check("work env", work_dir == submission.work_dir.resolve(), points=1)
+    result.check("output env", output_dir == submission.output_dir.resolve(), points=1)
+    result.check("cwd is work dir", Path.cwd().resolve() == work_dir, points=1)
+    return result
+"#,
+        input_env = job_contract::ENV_INPUT_DIR,
+        work_env = job_contract::ENV_WORK_DIR,
+        output_env = job_contract::ENV_OUTPUT_DIR,
+    ));
 
     let output = executor(&fixture)
         .run(

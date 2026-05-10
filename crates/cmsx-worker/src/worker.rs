@@ -25,6 +25,11 @@ use crate::{
 
 type ActiveJobs = Arc<RwLock<HashMap<Uuid, ActiveJobHandle>>>;
 
+const HEARTBEAT_INTERVAL_SECONDS: u64 = 10;
+const CLAIM_IDLE_SLEEP_SECONDS: u64 = 1;
+const CLAIM_ERROR_SLEEP_SECONDS: u64 = 3;
+const CLAIM_WAIT_SECONDS: u64 = 20;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancellationReason {
     None,
@@ -99,7 +104,7 @@ async fn heartbeat_loop(
     active_jobs: ActiveJobs,
     max_jobs: usize,
 ) {
-    let mut interval = tokio::time::interval(Duration::from_secs(10));
+    let mut interval = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS));
 
     loop {
         interval.tick().await;
@@ -193,26 +198,26 @@ async fn claim_loop(
         let available_slots = max_jobs.saturating_sub(current_running);
 
         if available_slots == 0 {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::sleep(Duration::from_secs(CLAIM_IDLE_SLEEP_SECONDS)).await;
             continue;
         }
 
         let request = ClaimJobRequest {
             available_slots: available_slots as i32,
-            wait_seconds: Some(20),
+            wait_seconds: Some(CLAIM_WAIT_SECONDS),
         };
 
         let response = match client.claim_job(&request).await {
             Ok(response) => response,
             Err(error) => {
                 tracing::warn!(?error, "job claim failed");
-                tokio::time::sleep(Duration::from_secs(3)).await;
+                tokio::time::sleep(Duration::from_secs(CLAIM_ERROR_SLEEP_SECONDS)).await;
                 continue;
             }
         };
 
         if response.jobs.is_empty() {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::sleep(Duration::from_secs(CLAIM_IDLE_SLEEP_SECONDS)).await;
             continue;
         }
 

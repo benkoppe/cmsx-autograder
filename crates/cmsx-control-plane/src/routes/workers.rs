@@ -20,8 +20,11 @@ use cmsx_core::{
     JobFailureRequest, JobResultRequest, JobStatus, ResultStatus, StartedJobRequest,
     WorkerAuthClaims, WorkerHeartbeatRequest, WorkerHeartbeatResponse, WorkerStatus,
     protocol::{
-        GRADING_RESULT_SCHEMA_VERSION, JOB_EVENT_BATCH_MAX_EVENTS, JOB_EVENT_MESSAGE_MAX_BYTES,
-        JobEventStream, JobEventVisibility, WORKER_AUTH_SCHEME, WORKER_JWT_AUDIENCE,
+        GRADING_RESULT_MAX_ARTIFACTS, GRADING_RESULT_MAX_TESTS, GRADING_RESULT_SCHEMA_VERSION,
+        JOB_EVENT_BATCH_MAX_EVENTS, JOB_EVENT_MESSAGE_MAX_BYTES, JOB_FAILURE_REASON_MAX_BYTES,
+        JOB_LEASE_SECONDS, JobEventStream, JobEventVisibility, MAX_CLAIM_WAIT_SECONDS,
+        WORKER_AUTH_SCHEME, WORKER_JWT_AUDIENCE, WORKER_JWT_MAX_VALIDITY_SECONDS,
+        WORKER_JWT_TIME_TOLERANCE_SECONDS, WORKER_REQUEST_NONCE_RETENTION_SECONDS,
     },
 };
 
@@ -41,7 +44,7 @@ pub fn router() -> Router<AppState> {
 
 const WORKER_REQUEST_MAX_BYTES: usize = 1024 * 1024;
 
-const LEASE_SECONDS: i64 = 60;
+const LEASE_SECONDS: i64 = JOB_LEASE_SECONDS;
 
 #[derive(Debug, Clone)]
 pub struct AuthenticatedWorker {
@@ -168,8 +171,12 @@ async fn verify_worker_jwt(
         let options = VerificationOptions {
             allowed_audiences: Some(HashSet::from([WORKER_JWT_AUDIENCE.to_string()])),
             required_key_id: Some(fingerprint.clone()),
-            time_tolerance: Some(jwt_simple::prelude::Duration::from_secs(60)),
-            max_validity: Some(jwt_simple::prelude::Duration::from_secs(60)),
+            time_tolerance: Some(jwt_simple::prelude::Duration::from_secs(
+                WORKER_JWT_TIME_TOLERANCE_SECONDS,
+            )),
+            max_validity: Some(jwt_simple::prelude::Duration::from_secs(
+                WORKER_JWT_MAX_VALIDITY_SECONDS,
+            )),
             ..Default::default()
         };
 
@@ -211,7 +218,7 @@ async fn verify_worker_jwt(
 
 async fn record_worker_jti(state: &AppState, worker_id: Uuid, jti: Uuid) -> Result<(), ApiError> {
     let now = Utc::now();
-    let expires_at = now + Duration::seconds(120);
+    let expires_at = now + Duration::seconds(WORKER_REQUEST_NONCE_RETENTION_SECONDS);
 
     sqlx::query!(
         r#"
@@ -1154,8 +1161,10 @@ fn validate_claim_request(value: &ClaimJobRequest) -> Result<(), ApiError> {
     if value.available_slots < 0 {
         return Err(ApiError::bad_request("available_slots must be nonnegative"));
     }
-    if value.wait_seconds.unwrap_or(0) > 30 {
-        return Err(ApiError::bad_request("wait_seconds must be <= 30"));
+    if value.wait_seconds.unwrap_or(0) > MAX_CLAIM_WAIT_SECONDS {
+        return Err(ApiError::bad_request(format!(
+            "wait_seconds must be <= {MAX_CLAIM_WAIT_SECONDS}"
+        )));
     }
 
     Ok(())
@@ -1198,9 +1207,6 @@ fn validate_event_batch(value: &JobEventBatchRequest) -> Result<(), ApiError> {
 fn validate_result_request(value: &JobResultRequest) -> Result<(), ApiError> {
     const MAX_FEEDBACK_BYTES: usize = JOB_EVENT_MESSAGE_MAX_BYTES;
     const MAX_SUMMARY_BYTES: usize = JOB_EVENT_MESSAGE_MAX_BYTES;
-    const MAX_TESTS: usize = 512;
-    const MAX_ARTIFACTS: usize = 128;
-
     if value.result.schema_version != GRADING_RESULT_SCHEMA_VERSION {
         return Err(ApiError::bad_request("unsupported result schema_version"));
     }
@@ -1215,10 +1221,10 @@ fn validate_result_request(value: &JobResultRequest) -> Result<(), ApiError> {
             "result score must not exceed max_score",
         ));
     }
-    if value.result.tests.len() > MAX_TESTS {
+    if value.result.tests.len() > GRADING_RESULT_MAX_TESTS {
         return Err(ApiError::bad_request("too many tests in result"));
     }
-    if value.result.artifacts.len() > MAX_ARTIFACTS {
+    if value.result.artifacts.len() > GRADING_RESULT_MAX_ARTIFACTS {
         return Err(ApiError::bad_request("too many artifacts in result"));
     }
     if let Some(feedback) = &value.result.feedback
@@ -1266,7 +1272,7 @@ fn validate_failure_request(value: &JobFailureRequest) -> Result<(), ApiError> {
     if value.reason.trim().is_empty() {
         return Err(ApiError::bad_request("failure reason must not be empty"));
     }
-    if value.reason.len() > 128 {
+    if value.reason.len() > JOB_FAILURE_REASON_MAX_BYTES {
         return Err(ApiError::bad_request("failure reason too large"));
     }
     if value.message.len() > JOB_EVENT_MESSAGE_MAX_BYTES {

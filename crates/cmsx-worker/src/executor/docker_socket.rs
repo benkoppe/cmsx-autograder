@@ -25,11 +25,21 @@ use crate::{
         ExecutionOutput, ExecutionStatus,
         utils::{OutputSummaries, normalize_timeout_seconds},
     },
+    job_contract,
     workspace::JobWorkspace,
 };
 
 const RUNNER_USER: &str = "10001:10001";
 const RUNNER_HOME: &str = "/tmp";
+const CONTAINER_PYTHON_COMMAND: &str = "python";
+const DOCKER_NETWORK_BRIDGE: &str = "bridge";
+const DOCKER_NETWORK_NONE: &str = "none";
+const DOCKER_DROP_ALL_CAPS: &str = "ALL";
+const DOCKER_NO_NEW_PRIVILEGES: &str = "no-new-privileges:true";
+const DOCKER_KILL_SIGNAL: &str = "SIGKILL";
+const DOCKER_LOG_TAIL_ALL: &str = "all";
+const LOG_READER_JOIN_TIMEOUT_SECONDS: u64 = 2;
+const BYTES_PER_MEBIBYTE: i64 = 1024 * 1024;
 
 #[derive(Clone)]
 pub struct DockerSocketExecutor {
@@ -147,24 +157,24 @@ impl DockerSocketExecutor {
 
         let host_config = HostConfig {
             mounts: Some(vec![
-                bind_mount(&input_dir, "/input", true),
-                bind_mount(&grader_dir, "/grader", true),
-                bind_mount(&work_dir, "/work", false),
-                bind_mount(&output_dir, "/output", false),
+                bind_mount(&input_dir, job_contract::CONTAINER_INPUT_DIR, true),
+                bind_mount(&grader_dir, job_contract::CONTAINER_GRADER_DIR, true),
+                bind_mount(&work_dir, job_contract::CONTAINER_WORK_DIR, false),
+                bind_mount(&output_dir, job_contract::CONTAINER_OUTPUT_DIR, false),
             ]),
             tmpfs: Some(default_tmpfs_mounts()),
             network_mode: Some(if config.network_enabled {
-                "bridge".to_string()
+                DOCKER_NETWORK_BRIDGE.to_string()
             } else {
-                "none".to_string()
+                DOCKER_NETWORK_NONE.to_string()
             }),
             memory: config.memory_bytes,
             memory_swap: config.memory_bytes,
             nano_cpus: config.nano_cpus,
             pids_limit: config.pids_limit,
             readonly_rootfs: Some(true),
-            cap_drop: Some(vec!["ALL".to_string()]),
-            security_opt: Some(vec!["no-new-privileges:true".to_string()]),
+            cap_drop: Some(vec![DOCKER_DROP_ALL_CAPS.to_string()]),
+            security_opt: Some(vec![DOCKER_NO_NEW_PRIVILEGES.to_string()]),
             privileged: Some(false),
             publish_all_ports: Some(false),
             auto_remove: Some(false),
@@ -176,17 +186,33 @@ impl DockerSocketExecutor {
             image: Some(config.image.clone()),
             user: Some(RUNNER_USER.to_string()),
             cmd: Some(vec![
-                "python".to_string(),
+                CONTAINER_PYTHON_COMMAND.to_string(),
                 "-m".to_string(),
-                "cmsx_autograder".to_string(),
-                "/grader/grade.py".to_string(),
+                job_contract::SDK_MODULE.to_string(),
+                format!(
+                    "{}/{}",
+                    job_contract::CONTAINER_GRADER_DIR,
+                    job_contract::GRADE_PY
+                ),
             ]),
-            working_dir: Some("/work".to_string()),
+            working_dir: Some(job_contract::CONTAINER_WORK_DIR.to_string()),
             env: Some(vec![
                 format!("HOME={RUNNER_HOME}"),
-                "CMSX_INPUT_DIR=/input".to_string(),
-                "CMSX_WORK_DIR=/work".to_string(),
-                "CMSX_OUTPUT_DIR=/output".to_string(),
+                format!(
+                    "{}={}",
+                    job_contract::ENV_INPUT_DIR,
+                    job_contract::CONTAINER_INPUT_DIR
+                ),
+                format!(
+                    "{}={}",
+                    job_contract::ENV_WORK_DIR,
+                    job_contract::CONTAINER_WORK_DIR
+                ),
+                format!(
+                    "{}={}",
+                    job_contract::ENV_OUTPUT_DIR,
+                    job_contract::CONTAINER_OUTPUT_DIR
+                ),
             ]),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
@@ -288,7 +314,7 @@ pub fn normalize_memory_bytes(memory_mb: Option<i64>) -> Result<Option<i64>> {
     }
 
     memory_mb
-        .checked_mul(1024 * 1024)
+        .checked_mul(BYTES_PER_MEBIBYTE)
         .map(Some)
         .ok_or_else(|| anyhow::anyhow!("execution_config.memory_mb is too large"))
 }
@@ -387,7 +413,7 @@ async fn wait_after_kill(docker: &Docker, container_id: &str) {
 
 async fn kill_container(docker: &Docker, container_id: &str) {
     let options = KillContainerOptionsBuilder::default()
-        .signal("SIGKILL")
+        .signal(DOCKER_KILL_SIGNAL)
         .build();
 
     if let Err(error) = docker.kill_container(container_id, Some(options)).await {
@@ -421,7 +447,7 @@ async fn collect_logs(
         .stdout(true)
         .stderr(true)
         .timestamps(false)
-        .tail("all")
+        .tail(DOCKER_LOG_TAIL_ALL)
         .build();
 
     let mut summaries = OutputSummaries::default();
@@ -459,7 +485,7 @@ async fn collect_logs(
 }
 
 async fn join_logs(task: JoinHandle<OutputSummaries>) -> OutputSummaries {
-    match tokio::time::timeout(Duration::from_secs(2), task).await {
+    match tokio::time::timeout(Duration::from_secs(LOG_READER_JOIN_TIMEOUT_SECONDS), task).await {
         Ok(Ok(summaries)) => summaries,
         Ok(Err(error)) => {
             tracing::warn!(?error, "Docker log collection task failed");
@@ -558,7 +584,7 @@ mod tests {
         let config = parse_docker_job_config(&job, &default_executor_config()).unwrap();
 
         assert_eq!(config.timeout_seconds, 60);
-        assert_eq!(config.memory_bytes, Some(512 * 1024 * 1024));
+        assert_eq!(config.memory_bytes, Some(512 * BYTES_PER_MEBIBYTE));
         assert_eq!(config.nano_cpus, Some(1_000_000_000));
         assert_eq!(config.pids_limit, Some(128));
         assert!(!config.network_enabled);
@@ -580,7 +606,7 @@ mod tests {
         let config = parse_docker_job_config(&job, &default_executor_config()).unwrap();
 
         assert_eq!(config.timeout_seconds, 30);
-        assert_eq!(config.memory_bytes, Some(256 * 1024 * 1024));
+        assert_eq!(config.memory_bytes, Some(256 * BYTES_PER_MEBIBYTE));
         assert_eq!(config.nano_cpus, Some(1_500_000_000));
         assert_eq!(config.pids_limit, Some(64));
         assert!(config.network_enabled);
@@ -602,7 +628,7 @@ mod tests {
         let config = parse_docker_job_config(&job, &default_executor_config()).unwrap();
 
         assert_eq!(config.timeout_seconds, 30);
-        assert_eq!(config.memory_bytes, Some(512 * 1024 * 1024));
+        assert_eq!(config.memory_bytes, Some(512 * BYTES_PER_MEBIBYTE));
         assert_eq!(config.nano_cpus, Some(1_500_000_000));
         assert_eq!(config.pids_limit, Some(128));
         assert!(config.network_enabled);

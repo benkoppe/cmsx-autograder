@@ -16,8 +16,11 @@ use uuid::Uuid;
 
 use cmsx_core::{ClaimedJob, ClaimedJobFile, GradingResult};
 
+use crate::job_contract;
+
 pub const MAX_INPUT_FILE_BYTES: u64 = 64 * 1024 * 1024;
 pub const RESULT_JSON_MAX_BYTES: u64 = 1024 * 1024;
+const MATERIALIZATION_BUFFER_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct JobWorkspace {
@@ -154,13 +157,13 @@ pub fn build_workspace_paths(
     let root = workspace_root
         .join(job.id.to_string())
         .join(format!("attempt-{}", job.attempt));
-    let input_dir = root.join("input");
-    let files_dir = input_dir.join("files");
-    let grader_dir = root.join("grader");
-    let work_dir = root.join("work");
-    let output_dir = root.join("output");
-    let artifacts_dir = output_dir.join("artifacts");
-    let result_path = output_dir.join("result.json");
+    let input_dir = root.join(job_contract::INPUT_DIR);
+    let files_dir = input_dir.join(job_contract::FILES_DIR);
+    let grader_dir = root.join(job_contract::GRADER_DIR);
+    let work_dir = root.join(job_contract::WORK_DIR);
+    let output_dir = root.join(job_contract::OUTPUT_DIR);
+    let artifacts_dir = output_dir.join(job_contract::ARTIFACTS_DIR);
+    let result_path = output_dir.join(job_contract::RESULT_JSON);
 
     Ok(JobWorkspace {
         root,
@@ -238,7 +241,7 @@ async fn write_metadata(job: &ClaimedJob, workspace: &JobWorkspace) -> Result<()
     };
 
     let bytes = serde_json::to_vec_pretty(&metadata)?;
-    tokio_fs::write(workspace.input_dir.join("metadata.json"), bytes).await?;
+    tokio_fs::write(workspace.input_dir.join(job_contract::METADATA_JSON), bytes).await?;
 
     Ok(())
 }
@@ -358,7 +361,7 @@ where
     let mut file = tokio_fs::File::create(temp_path).await?;
     let mut hasher = Sha256::new();
     let mut actual = 0_u64;
-    let mut buffer = [0_u8; 8192];
+    let mut buffer = [0_u8; MATERIALIZATION_BUFFER_BYTES];
 
     loop {
         if cancel.is_cancelled() {
@@ -498,7 +501,7 @@ pub fn install_grader_bundle(
 
     copy_grader_dir(&canonical_source, &canonical_destination)?;
 
-    let grade_py = canonical_destination.join("grade.py");
+    let grade_py = canonical_destination.join(job_contract::GRADE_PY);
     if !grade_py.exists() || !grade_py.is_file() {
         return Err(WorkspaceError::GradePyMissing(
             grade_py.display().to_string(),
@@ -596,6 +599,23 @@ mod tests {
         }
     }
 
+    fn test_workspace(temp: &TempDir) -> JobWorkspace {
+        let root = temp.path().to_path_buf();
+        let input_dir = root.join(job_contract::INPUT_DIR);
+        let output_dir = root.join(job_contract::OUTPUT_DIR);
+
+        JobWorkspace {
+            root: root.clone(),
+            input_dir: input_dir.clone(),
+            files_dir: input_dir.join(job_contract::FILES_DIR),
+            grader_dir: root.join(job_contract::GRADER_DIR),
+            work_dir: root.join(job_contract::WORK_DIR),
+            artifacts_dir: output_dir.join(job_contract::ARTIFACTS_DIR),
+            result_path: output_dir.join(job_contract::RESULT_JSON),
+            output_dir,
+        }
+    }
+
     #[test]
     fn safe_component_accepts_simple_name() {
         validate_safe_component("hello.py").unwrap();
@@ -633,18 +653,36 @@ mod tests {
             workspace.root,
             root.join(job.id.to_string()).join("attempt-2")
         );
-        assert_eq!(workspace.input_dir, workspace.root.join("input"));
+        assert_eq!(
+            workspace.input_dir,
+            workspace.root.join(job_contract::INPUT_DIR)
+        );
         assert_eq!(workspace.files_dir, workspace.root.join("input/files"));
-        assert_eq!(workspace.grader_dir, workspace.root.join("grader"));
-        assert_eq!(workspace.work_dir, workspace.root.join("work"));
-        assert_eq!(workspace.output_dir, workspace.root.join("output"));
+        assert_eq!(
+            workspace.grader_dir,
+            workspace.root.join(job_contract::GRADER_DIR)
+        );
+        assert_eq!(
+            workspace.work_dir,
+            workspace.root.join(job_contract::WORK_DIR)
+        );
+        assert_eq!(
+            workspace.output_dir,
+            workspace.root.join(job_contract::OUTPUT_DIR)
+        );
         assert_eq!(
             workspace.artifacts_dir,
-            workspace.root.join("output/artifacts")
+            workspace
+                .root
+                .join(job_contract::OUTPUT_DIR)
+                .join(job_contract::ARTIFACTS_DIR)
         );
         assert_eq!(
             workspace.result_path,
-            workspace.root.join("output/result.json")
+            workspace
+                .root
+                .join(job_contract::OUTPUT_DIR)
+                .join(job_contract::RESULT_JSON)
         );
     }
 
@@ -662,7 +700,7 @@ mod tests {
         let job = test_job(1);
         let workspace = prepare_attempt_workspace(temp.path(), &job).await.unwrap();
 
-        let metadata_path = workspace.input_dir.join("metadata.json");
+        let metadata_path = workspace.input_dir.join(job_contract::METADATA_JSON);
         let metadata: serde_json::Value =
             serde_json::from_slice(&tokio_fs::read(metadata_path).await.unwrap()).unwrap();
 
@@ -811,7 +849,12 @@ mod tests {
 
         let error = materialize_input_file_from_async_read(
             &b"hello"[..],
-            materialize_request(&temp, file_id, 65 * 1024 * 1024, CancellationToken::new()),
+            materialize_request(
+                &temp,
+                file_id,
+                (MAX_INPUT_FILE_BYTES + 1) as i64,
+                CancellationToken::new(),
+            ),
         )
         .await
         .unwrap_err();
@@ -873,25 +916,16 @@ mod tests {
 
         let source = grader_temp.path().join("intro");
         fs::create_dir_all(source.join("nested")).unwrap();
-        fs::write(source.join("grade.py"), "print('grade')").unwrap();
+        fs::write(source.join(job_contract::GRADE_PY), "print('grade')").unwrap();
         fs::write(source.join("nested/helper.py"), "x = 1").unwrap();
 
-        let workspace = JobWorkspace {
-            root: workspace_temp.path().to_path_buf(),
-            input_dir: workspace_temp.path().join("input"),
-            files_dir: workspace_temp.path().join("input/files"),
-            grader_dir: workspace_temp.path().join("grader"),
-            work_dir: workspace_temp.path().join("work"),
-            output_dir: workspace_temp.path().join("output"),
-            artifacts_dir: workspace_temp.path().join("output/artifacts"),
-            result_path: workspace_temp.path().join("output/result.json"),
-        };
+        let workspace = test_workspace(&workspace_temp);
 
         fs::create_dir_all(&workspace.grader_dir).unwrap();
 
         install_grader_bundle(grader_temp.path(), "intro", &workspace).unwrap();
 
-        assert!(workspace.grader_dir.join("grade.py").exists());
+        assert!(workspace.grader_dir.join(job_contract::GRADE_PY).exists());
         assert!(workspace.grader_dir.join("nested/helper.py").exists());
     }
 
@@ -902,16 +936,7 @@ mod tests {
 
         fs::create_dir_all(grader_temp.path().join("intro")).unwrap();
 
-        let workspace = JobWorkspace {
-            root: workspace_temp.path().to_path_buf(),
-            input_dir: workspace_temp.path().join("input"),
-            files_dir: workspace_temp.path().join("input/files"),
-            grader_dir: workspace_temp.path().join("grader"),
-            work_dir: workspace_temp.path().join("work"),
-            output_dir: workspace_temp.path().join("output"),
-            artifacts_dir: workspace_temp.path().join("output/artifacts"),
-            result_path: workspace_temp.path().join("output/result.json"),
-        };
+        let workspace = test_workspace(&workspace_temp);
 
         fs::create_dir_all(&workspace.grader_dir).unwrap();
 
@@ -927,18 +952,9 @@ mod tests {
 
         let source = grader_temp.path().join("intro");
         fs::create_dir_all(&source).unwrap();
-        fs::write(source.join("grade.py"), "print('grade')").unwrap();
+        fs::write(source.join(job_contract::GRADE_PY), "print('grade')").unwrap();
 
-        let workspace = JobWorkspace {
-            root: workspace_temp.path().to_path_buf(),
-            input_dir: workspace_temp.path().join("input"),
-            files_dir: workspace_temp.path().join("input/files"),
-            grader_dir: workspace_temp.path().join("grader"),
-            work_dir: workspace_temp.path().join("work"),
-            output_dir: workspace_temp.path().join("output"),
-            artifacts_dir: workspace_temp.path().join("output/artifacts"),
-            result_path: workspace_temp.path().join("output/result.json"),
-        };
+        let workspace = test_workspace(&workspace_temp);
 
         fs::create_dir_all(&workspace.grader_dir).unwrap();
         fs::write(workspace.grader_dir.join("stale"), "stale").unwrap();
@@ -961,19 +977,14 @@ mod tests {
 
         let source = grader_temp.path().join("intro");
         fs::create_dir_all(&source).unwrap();
-        fs::write(source.join("grade.py"), "print('grade')").unwrap();
-        symlink(source.join("grade.py"), source.join("linked.py")).unwrap();
+        fs::write(source.join(job_contract::GRADE_PY), "print('grade')").unwrap();
+        symlink(
+            source.join(job_contract::GRADE_PY),
+            source.join("linked.py"),
+        )
+        .unwrap();
 
-        let workspace = JobWorkspace {
-            root: workspace_temp.path().to_path_buf(),
-            input_dir: workspace_temp.path().join("input"),
-            files_dir: workspace_temp.path().join("input/files"),
-            grader_dir: workspace_temp.path().join("grader"),
-            work_dir: workspace_temp.path().join("work"),
-            output_dir: workspace_temp.path().join("output"),
-            artifacts_dir: workspace_temp.path().join("output/artifacts"),
-            result_path: workspace_temp.path().join("output/result.json"),
-        };
+        let workspace = test_workspace(&workspace_temp);
 
         fs::create_dir_all(&workspace.grader_dir).unwrap();
 
@@ -986,7 +997,7 @@ mod tests {
     async fn result_read_missing() {
         let temp = TempDir::new().unwrap();
 
-        let error = read_bounded_result_json(&temp.path().join("result.json"))
+        let error = read_bounded_result_json(&temp.path().join(job_contract::RESULT_JSON))
             .await
             .unwrap_err();
 
@@ -996,7 +1007,7 @@ mod tests {
     #[tokio::test]
     async fn result_read_invalid_json() {
         let temp = TempDir::new().unwrap();
-        let result_path = temp.path().join("result.json");
+        let result_path = temp.path().join(job_contract::RESULT_JSON);
 
         tokio_fs::write(&result_path, b"not-json").await.unwrap();
 
@@ -1008,7 +1019,7 @@ mod tests {
     #[tokio::test]
     async fn result_read_too_large() {
         let temp = TempDir::new().unwrap();
-        let result_path = temp.path().join("result.json");
+        let result_path = temp.path().join(job_contract::RESULT_JSON);
         let file = tokio_fs::File::create(&result_path).await.unwrap();
 
         file.set_len(RESULT_JSON_MAX_BYTES + 1).await.unwrap();
@@ -1021,7 +1032,7 @@ mod tests {
     #[tokio::test]
     async fn result_read_valid() {
         let temp = TempDir::new().unwrap();
-        let result_path = temp.path().join("result.json");
+        let result_path = temp.path().join(job_contract::RESULT_JSON);
         let result = json!({
             "schema_version": GRADING_RESULT_SCHEMA_VERSION,
             "status": ResultStatus::Passed.as_str(),
