@@ -72,6 +72,7 @@
       packages = rec {
         default = cmsx-control-plane;
         cmsx-control-plane = mkWorkspacePackage "cmsx-control-plane";
+        cmsx-worker = mkWorkspacePackage "cmsx-worker";
       };
 
       checks = {
@@ -140,6 +141,11 @@
         cmsx-control-plane = {
           type = "app";
           program = lib.getExe self'.packages.cmsx-control-plane;
+        };
+
+        cmsx-worker = {
+          type = "app";
+          program = lib.getExe self'.packages.cmsx-worker;
         };
 
         default = self'.apps.cmsx-control-plane;
