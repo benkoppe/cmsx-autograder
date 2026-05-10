@@ -37,13 +37,18 @@
       commonBuildArgs = {
         strictDeps = true;
 
-        env.SQLX_OFFLINE = "true";
+        env = {
+          SQLX_OFFLINE = "true";
+          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+          BINDGEN_EXTRA_CLANG_ARGS = lib.optionalString pkgs.stdenv.isLinux "-isystem ${pkgs.stdenv.cc.libc.dev}/include";
+        };
 
         nativeBuildInputs = [
           pkgs.cmake
           pkgs.git
           pkgs.pkg-config
           pkgs.postgresql
+          pkgs.llvmPackages.libclang
         ]
         ++ lib.optionals pkgs.stdenv.isDarwin [
           pkgs.libiconv

@@ -37,6 +37,7 @@
         ./flake-parts/git-hooks.nix
         ./flake-parts/services.nix
         ./flake-parts/docker-images.nix
+        ./flake-parts/e2e-tests.nix
       ];
     };
 }
