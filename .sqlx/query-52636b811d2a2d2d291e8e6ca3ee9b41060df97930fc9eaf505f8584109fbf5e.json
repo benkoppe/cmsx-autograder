@@ -1,0 +1,80 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            grading_jobs.id,\n            grading_jobs.submission_id,\n            grading_jobs.assignment_id,\n            assignments.slug AS assignment_slug,\n            grading_jobs.lease_expires_at,\n            grading_jobs.attempts,\n            assignments.execution_config AS \"execution_config: SqlxJson<Value>\",\n            assignments.runner_config AS \"runner_config: SqlxJson<Value>\",\n            assignments.capabilities AS \"capabilities: SqlxJson<Value>\",\n            submissions.raw_metadata AS \"raw_metadata: SqlxJson<Value>\"\n        FROM grading_jobs\n        JOIN assignments ON assignments.id = grading_jobs.assignment_id\n        JOIN submissions ON submissions.id = grading_jobs.submission_id\n        WHERE grading_jobs.id = $1\n          AND grading_jobs.worker_id = $2\n          AND grading_jobs.status IN ($3, $4)\n          AND grading_jobs.lease_expires_at > $5\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "submission_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "assignment_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "assignment_slug",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "lease_expires_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "execution_config: SqlxJson<Value>",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 7,
+        "name": "runner_config: SqlxJson<Value>",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 8,
+        "name": "capabilities: SqlxJson<Value>",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 9,
+        "name": "raw_metadata: SqlxJson<Value>",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "52636b811d2a2d2d291e8e6ca3ee9b41060df97930fc9eaf505f8584109fbf5e"
+}

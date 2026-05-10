@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT submission_files.storage_path, submission_files.safe_filename\n        FROM grading_jobs\n        JOIN submission_files ON submission_files.submission_id = grading_jobs.submission_id\n        WHERE grading_jobs.id = $1\n          AND grading_jobs.worker_id = $2\n          AND grading_jobs.status IN ($3, $4)\n          AND grading_jobs.lease_expires_at > $5\n          AND submission_files.id = $6\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "storage_path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "safe_filename",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "a02836851bee39d16d8fa056b1b96eb8635e407fac3e798448467dfe0793ab0b"
+}
