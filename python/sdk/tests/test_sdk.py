@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from cmsx_autograder import Result, Submission
+from cmsx_autograder import CheckResult, Result, Status, Submission
 
 
 def test_importing_grade_file_does_not_write_result(tmp_path):
@@ -72,6 +72,54 @@ def main(submission):
     assert result["status"] == "passed"
     assert result["score"] == 10
     assert result["max_score"] == 10
+
+
+def test_cli_grade_file_can_import_sibling_helper(tmp_path):
+    input_dir = tmp_path / "input"
+    work_dir = tmp_path / "work"
+    output_dir = tmp_path / "output"
+    grade_file = tmp_path / "grade.py"
+    helper_file = tmp_path / "helper.py"
+
+    input_dir.mkdir()
+    work_dir.mkdir()
+
+    helper_file.write_text(
+        """
+def points():
+    return 3
+""",
+        encoding="utf-8",
+    )
+
+    grade_file.write_text(
+        """
+from cmsx_autograder import Result
+from helper import points
+def main(submission):
+    result = Result(max_score=3)
+    result.check("helper", True, points=points())
+    return result
+""",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "cmsx_autograder", str(grade_file)],
+        env={
+            "CMSX_INPUT_DIR": str(input_dir),
+            "CMSX_WORK_DIR": str(work_dir),
+            "CMSX_OUTPUT_DIR": str(output_dir),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    result = json.loads((output_dir / "result.json").read_text(encoding="utf-8"))
+    assert result["status"] == "passed"
+    assert result["score"] == 3
 
 
 def test_missing_main_writes_error_result(tmp_path):
@@ -226,3 +274,51 @@ def test_result_rejects_too_many_check_points():
 
     with pytest.raises(ValueError):
         result.to_json()
+
+
+def test_result_rejects_non_finite_max_score():
+    with pytest.raises(ValueError, match="finite"):
+        Result(max_score=float("nan"))
+
+    with pytest.raises(ValueError, match="finite"):
+        Result(max_score=float("inf"))
+
+
+def test_check_rejects_non_finite_points():
+    result = Result(max_score=1)
+
+    with pytest.raises(ValueError, match="finite"):
+        result.check("bad", True, points=float("nan"))
+
+    with pytest.raises(ValueError, match="finite"):
+        result.check("bad", True, points=float("inf"))
+
+
+def test_derived_status_fails_when_any_check_failed_despite_full_score():
+    result = Result(max_score=1)
+    result.tests.append(
+        CheckResult(
+            name="failed but scored",
+            status=Status.FAILED,
+            score=1,
+            max_score=1,
+        )
+    )
+
+    encoded = result.to_json()
+
+    assert encoded["status"] == "failed"
+
+
+def test_derived_status_errors_when_any_check_error():
+    result = Result(max_score=0)
+    result.tests.append(
+        CheckResult(
+            name="error",
+            status=Status.ERROR,
+            score=0,
+            max_score=0,
+        )
+    )
+
+    assert result.to_json()["status"] == "error"
