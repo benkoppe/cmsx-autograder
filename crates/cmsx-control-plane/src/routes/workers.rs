@@ -17,11 +17,14 @@ use uuid::Uuid;
 
 use cmsx_core::{
     ClaimJobRequest, ClaimJobResponse, ClaimedJob, ClaimedJobFile, JobEventBatchRequest,
-    JobFailureRequest, JobResultRequest, StartedJobRequest, WorkerAuthClaims,
-    WorkerHeartbeatRequest, WorkerHeartbeatResponse,
+    JobFailureRequest, JobResultRequest, JobStatus, ResultStatus, StartedJobRequest,
+    WorkerAuthClaims, WorkerHeartbeatRequest, WorkerHeartbeatResponse, WorkerStatus,
     protocol::{
-        GRADING_RESULT_SCHEMA_VERSION, JOB_EVENT_BATCH_MAX_EVENTS, JOB_EVENT_MESSAGE_MAX_BYTES,
-        JobEventStream, JobEventVisibility, WORKER_AUTH_SCHEME, WORKER_JWT_AUDIENCE,
+        GRADING_RESULT_MAX_ARTIFACTS, GRADING_RESULT_MAX_TESTS, GRADING_RESULT_SCHEMA_VERSION,
+        JOB_EVENT_BATCH_MAX_EVENTS, JOB_EVENT_MESSAGE_MAX_BYTES, JOB_FAILURE_REASON_MAX_BYTES,
+        JOB_LEASE_SECONDS, JobEventStream, JobEventVisibility, MAX_CLAIM_WAIT_SECONDS,
+        WORKER_AUTH_SCHEME, WORKER_JWT_AUDIENCE, WORKER_JWT_MAX_VALIDITY_SECONDS,
+        WORKER_JWT_TIME_TOLERANCE_SECONDS, WORKER_REQUEST_NONCE_RETENTION_SECONDS,
     },
 };
 
@@ -41,7 +44,7 @@ pub fn router() -> Router<AppState> {
 
 const WORKER_REQUEST_MAX_BYTES: usize = 1024 * 1024;
 
-const LEASE_SECONDS: i64 = 60;
+const LEASE_SECONDS: i64 = JOB_LEASE_SECONDS;
 
 #[derive(Debug, Clone)]
 pub struct AuthenticatedWorker {
@@ -135,6 +138,8 @@ async fn verify_worker_jwt(
     path: &str,
     body_sha256: &str,
 ) -> Result<AuthenticatedWorker, ApiError> {
+    let disabled = WorkerStatus::Disabled.as_str();
+
     let metadata = Token::decode_metadata(token)
         .map_err(|_| ApiError::unauthorized("invalid worker token"))?;
 
@@ -150,9 +155,10 @@ async fn verify_worker_jwt(
         JOIN workers ON workers.id = worker_keys.worker_id
         WHERE worker_keys.public_key_fingerprint = $1
           AND worker_keys.revoked_at IS NULL
-          AND workers.status != 'disabled'
+          AND workers.status != $2
         "#,
-        fingerprint
+        fingerprint,
+        disabled
     )
     .fetch_all(&state.db)
     .await
@@ -165,8 +171,12 @@ async fn verify_worker_jwt(
         let options = VerificationOptions {
             allowed_audiences: Some(HashSet::from([WORKER_JWT_AUDIENCE.to_string()])),
             required_key_id: Some(fingerprint.clone()),
-            time_tolerance: Some(jwt_simple::prelude::Duration::from_secs(60)),
-            max_validity: Some(jwt_simple::prelude::Duration::from_secs(60)),
+            time_tolerance: Some(jwt_simple::prelude::Duration::from_secs(
+                WORKER_JWT_TIME_TOLERANCE_SECONDS,
+            )),
+            max_validity: Some(jwt_simple::prelude::Duration::from_secs(
+                WORKER_JWT_MAX_VALIDITY_SECONDS,
+            )),
             ..Default::default()
         };
 
@@ -208,7 +218,7 @@ async fn verify_worker_jwt(
 
 async fn record_worker_jti(state: &AppState, worker_id: Uuid, jti: Uuid) -> Result<(), ApiError> {
     let now = Utc::now();
-    let expires_at = now + Duration::seconds(120);
+    let expires_at = now + Duration::seconds(WORKER_REQUEST_NONCE_RETENTION_SECONDS);
 
     sqlx::query!(
         r#"
@@ -281,15 +291,18 @@ async fn record_worker_heartbeat(
     value: &WorkerHeartbeatRequest,
     now: chrono::DateTime<Utc>,
 ) -> Result<(), ApiError> {
+    let online = WorkerStatus::Online.as_str();
+
     sqlx::query!(
         r#"
         UPDATE workers
-        SET status = 'online',
-            version = $2,
-            last_seen_at = $3
+        SET status = $2,
+            version = $3,
+            last_seen_at = $4
         WHERE id = $1
         "#,
         worker_id,
+        online,
         value.version,
         now
     )
@@ -308,10 +321,11 @@ async fn record_worker_heartbeat(
             max_jobs,
             reported_at
         )
-        VALUES ($1, $2, 'online', $3, $4, $5, $6)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
         Uuid::now_v7(),
         worker_id,
+        online,
         value.version,
         value.running_jobs,
         value.max_jobs,
@@ -352,25 +366,36 @@ async fn reconcile_active_jobs(
             continue;
         };
 
-        if row.worker_id != Some(worker_id) || !matches!(row.status.as_str(), "claimed" | "running")
+        let status = row
+            .status
+            .parse::<JobStatus>()
+            .map_err(|_| ApiError::internal("invalid job status in database"))?;
+
+        if row.worker_id != Some(worker_id)
+            || !matches!(status, JobStatus::Claimed | JobStatus::Running)
         {
             unknown_job_ids.push(*job_id);
             continue;
         }
 
         if row.cancel_requested_at.is_some() {
+            let claimed = JobStatus::Claimed.as_str();
+            let running = JobStatus::Running.as_str();
+
             sqlx::query!(
                 r#"
                 UPDATE grading_jobs
-                SET lease_expires_at = $3,
-                    last_heartbeat_at = $4
+                SET lease_expires_at = $5,
+                    last_heartbeat_at = $6
                 WHERE id = $1
                   AND worker_id = $2
-                  AND status IN ('claimed', 'running')
+                  AND status IN ($3, $4)
                   AND cancel_requested_at IS NOT NULL
                 "#,
                 job_id,
                 worker_id,
+                claimed,
+                running,
                 now + Duration::seconds(LEASE_SECONDS),
                 now
             )
@@ -389,19 +414,24 @@ async fn reconcile_active_jobs(
             continue;
         }
 
+        let claimed = JobStatus::Claimed.as_str();
+        let running = JobStatus::Running.as_str();
+
         sqlx::query!(
             r#"
             UPDATE grading_jobs
-            SET lease_expires_at = $3,
-                last_heartbeat_at = $4
+            SET lease_expires_at = $5,
+                last_heartbeat_at = $6
             WHERE id = $1
               AND worker_id = $2
-              AND status IN ('claimed', 'running')
-              AND lease_expires_at > $4
+              AND status IN ($3, $4)
+              AND lease_expires_at > $6
               AND cancel_requested_at IS NULL
             "#,
             job_id,
             worker_id,
+            claimed,
+            running,
             now + Duration::seconds(LEASE_SECONDS),
             now
         )
@@ -440,6 +470,10 @@ async fn claim_available_jobs(
 ) -> Result<Vec<ClaimedJob>, ApiError> {
     let now = Utc::now();
     let mut tx = state.db.begin().await.map_err(ApiError::internal)?;
+    let queued = JobStatus::Queued.as_str();
+    let claimed = JobStatus::Claimed.as_str();
+    let running = JobStatus::Running.as_str();
+    let next_status = JobStatus::Claimed.as_str();
 
     sweep_expired_jobs_in_tx(&mut tx, now).await?;
 
@@ -450,11 +484,11 @@ async fn claim_available_jobs(
             FROM grading_jobs
             WHERE (
                 (
-                    grading_jobs.status = 'queued'
+                    grading_jobs.status = $5
                     AND grading_jobs.cancel_requested_at IS NULL
                 )
                 OR (
-                    grading_jobs.status IN ('claimed', 'running')
+                    grading_jobs.status IN ($6, $7)
                     AND grading_jobs.lease_expires_at <= $2
                     AND grading_jobs.attempts < grading_jobs.max_attempts
                     AND grading_jobs.cancel_requested_at IS NULL
@@ -465,7 +499,7 @@ async fn claim_available_jobs(
             LIMIT $3
         )
         UPDATE grading_jobs
-        SET status = 'claimed',
+        SET status = $8,
             worker_id = $1,
             attempts = attempts + 1,
             claimed_at = $2,
@@ -484,7 +518,11 @@ async fn claim_available_jobs(
         worker_id,
         now,
         i64::from(request.available_slots),
-        now + Duration::seconds(LEASE_SECONDS)
+        now + Duration::seconds(LEASE_SECONDS),
+        queued,
+        claimed,
+        running,
+        next_status
     )
     .fetch_all(&mut *tx)
     .await
@@ -505,6 +543,9 @@ async fn load_claimed_job_in_tx(
     worker_id: Uuid,
     job_id: Uuid,
 ) -> Result<ClaimedJob, ApiError> {
+    let claimed = JobStatus::Claimed.as_str();
+    let running = JobStatus::Running.as_str();
+
     let row = sqlx::query!(
         r#"
         SELECT
@@ -523,10 +564,12 @@ async fn load_claimed_job_in_tx(
         JOIN submissions ON submissions.id = grading_jobs.submission_id
         WHERE grading_jobs.id = $1
           AND grading_jobs.worker_id = $2
-          AND grading_jobs.status IN ('claimed', 'running')
+          AND grading_jobs.status IN ($3, $4)
         "#,
         job_id,
-        worker_id
+        worker_id,
+        claimed,
+        running
     )
     .fetch_one(&mut **tx)
     .await
@@ -595,6 +638,9 @@ async fn load_owned_job(
     worker_id: Uuid,
     job_id: Uuid,
 ) -> Result<ClaimedJob, ApiError> {
+    let claimed = JobStatus::Claimed.as_str();
+    let running = JobStatus::Running.as_str();
+
     let row = sqlx::query!(
         r#"
         SELECT
@@ -613,10 +659,12 @@ async fn load_owned_job(
         JOIN submissions ON submissions.id = grading_jobs.submission_id
         WHERE grading_jobs.id = $1
           AND grading_jobs.worker_id = $2
-          AND grading_jobs.status IN ('claimed', 'running')
+          AND grading_jobs.status IN ($3, $4)
         "#,
         job_id,
-        worker_id
+        worker_id,
+        claimed,
+        running
     )
     .fetch_optional(&state.db)
     .await
@@ -669,24 +717,28 @@ pub async fn post_started(
     WorkerJson { worker, value: _ }: WorkerJson<StartedJobRequest>,
 ) -> Result<StatusCode, ApiError> {
     let now = Utc::now();
+    let claimed = JobStatus::Claimed.as_str();
+    let running = JobStatus::Running.as_str();
 
     let update = sqlx::query!(
         r#"
         UPDATE grading_jobs
-        SET status = 'running',
-            started_at = $3,
-            lease_expires_at = $4,
-            last_heartbeat_at = $3
+        SET status = $3,
+            started_at = $4,
+            lease_expires_at = $5,
+            last_heartbeat_at = $4
         WHERE id = $1
           AND worker_id = $2
-          AND status = 'claimed'
-          AND lease_expires_at > $3
+          AND status = $6
+          AND lease_expires_at > $4
           AND cancel_requested_at IS NULL
         "#,
         job_id,
         worker.id,
+        running,
         now,
-        now + Duration::seconds(LEASE_SECONDS)
+        now + Duration::seconds(LEASE_SECONDS),
+        claimed
     )
     .execute(&state.db)
     .await
@@ -700,7 +752,7 @@ pub async fn post_started(
                 FROM grading_jobs
                 WHERE id = $1
                   AND worker_id = $2
-                  AND status = 'claimed'
+                  AND status = $4
                   AND lease_expires_at > $3
                   AND cancel_requested_at IS NOT NULL
             )
@@ -708,6 +760,7 @@ pub async fn post_started(
             job_id,
             worker.id,
             now,
+            claimed,
         )
         .fetch_one(&state.db)
         .await
@@ -728,6 +781,8 @@ pub async fn get_job_file(
     worker: AuthenticatedWorker,
 ) -> Result<Response, ApiError> {
     let now = Utc::now();
+    let claimed = JobStatus::Claimed.as_str();
+    let running = JobStatus::Running.as_str();
 
     let file = sqlx::query!(
         r#"
@@ -736,12 +791,14 @@ pub async fn get_job_file(
         JOIN submission_files ON submission_files.submission_id = grading_jobs.submission_id
         WHERE grading_jobs.id = $1
           AND grading_jobs.worker_id = $2
-          AND grading_jobs.status IN ('claimed', 'running')
-          AND grading_jobs.lease_expires_at > $3
-          AND submission_files.id = $4
+          AND grading_jobs.status IN ($3, $4)
+          AND grading_jobs.lease_expires_at > $5
+          AND submission_files.id = $6
         "#,
         job_id,
         worker.id,
+        claimed,
+        running,
         now,
         file_id
     )
@@ -834,7 +891,9 @@ pub async fn post_result(
 
     let mut tx = state.db.begin().await.map_err(ApiError::internal)?;
 
-    let is_cancelled_result = matches!(value.result.status, cmsx_core::ResultStatus::Cancelled);
+    let is_cancelled_result = matches!(value.result.status, ResultStatus::Cancelled);
+    let claimed = JobStatus::Claimed.as_str();
+    let running = JobStatus::Running.as_str();
 
     let update = sqlx::query!(
         r#"
@@ -847,7 +906,7 @@ pub async fn post_result(
           AND lease_expires_at > $4
           AND (
             (
-                status = 'running'
+                status = $6
                 AND (
                     cancel_requested_at IS NULL
                     OR $5
@@ -855,7 +914,7 @@ pub async fn post_result(
             )
             OR (
                 $5
-                AND status = 'claimed'
+                AND status = $7
                 AND cancel_requested_at IS NOT NULL
             )
           )
@@ -864,7 +923,9 @@ pub async fn post_result(
         worker.id,
         job_status,
         now,
-        is_cancelled_result
+        is_cancelled_result,
+        running,
+        claimed
     )
     .execute(&mut *tx)
     .await
@@ -877,9 +938,9 @@ pub async fn post_result(
                 SELECT EXISTS (
                     SELECT 1
                     FROM grading_jobs
-                    WHERE id = $1
-                      AND worker_id = $2
-                      AND status IN ('claimed', 'running')
+                WHERE id = $1
+                  AND worker_id = $2
+                      AND status IN ($4, $5)
                       AND lease_expires_at > $3
                       AND cancel_requested_at IS NOT NULL
                 )
@@ -887,6 +948,8 @@ pub async fn post_result(
                 job_id,
                 worker.id,
                 now,
+                claimed,
+                running,
             )
             .fetch_one(&mut *tx)
             .await
@@ -948,6 +1011,8 @@ pub async fn post_failed(
 
     let now = Utc::now();
     let mut tx = state.db.begin().await.map_err(ApiError::internal)?;
+    let claimed = JobStatus::Claimed.as_str();
+    let running = JobStatus::Running.as_str();
 
     let row = sqlx::query!(
         r#"
@@ -955,12 +1020,14 @@ pub async fn post_failed(
         FROM grading_jobs
         WHERE id = $1
           AND worker_id = $2
-          AND status IN ('claimed', 'running')
-          AND lease_expires_at > $3
+          AND status IN ($3, $4)
+          AND lease_expires_at > $5
         FOR UPDATE
         "#,
         job_id,
         worker.id,
+        claimed,
+        running,
         now
     )
     .fetch_optional(&mut *tx)
@@ -973,23 +1040,26 @@ pub async fn post_failed(
     }
 
     if value.retryable && row.attempts < row.max_attempts {
+        let queued = JobStatus::Queued.as_str();
+
         sqlx::query!(
             r#"
             UPDATE grading_jobs
-            SET status = 'queued',
+            SET status = $3,
                 worker_id = NULL,
                 claimed_at = NULL,
                 started_at = NULL,
                 lease_expires_at = NULL,
                 last_heartbeat_at = NULL,
-                failure_reason = $3,
-                failure_message = $4,
+                failure_reason = $4,
+                failure_message = $5,
                 failure_retryable = true
             WHERE id = $1
               AND worker_id = $2
             "#,
             job_id,
             worker.id,
+            queued,
             value.reason,
             value.message
         )
@@ -997,20 +1067,23 @@ pub async fn post_failed(
         .await
         .map_err(ApiError::internal)?;
     } else {
+        let error = JobStatus::Error.as_str();
+
         sqlx::query!(
             r#"
             UPDATE grading_jobs
-            SET status = 'error',
-                failure_reason = $3,
-                failure_message = $4,
-                failure_retryable = $5,
-                finished_at = $6,
+            SET status = $3,
+                failure_reason = $4,
+                failure_message = $5,
+                failure_retryable = $6,
+                finished_at = $7,
                 lease_expires_at = NULL
             WHERE id = $1
               AND worker_id = $2
             "#,
             job_id,
             worker.id,
+            error,
             value.reason,
             value.message,
             value.retryable,
@@ -1031,6 +1104,8 @@ async fn ensure_active_job_owner(
     job_id: Uuid,
 ) -> Result<(), ApiError> {
     let now = Utc::now();
+    let claimed = JobStatus::Claimed.as_str();
+    let running = JobStatus::Running.as_str();
 
     let exists = sqlx::query_scalar!(
         r#"
@@ -1039,12 +1114,14 @@ async fn ensure_active_job_owner(
             FROM grading_jobs
             WHERE id = $1
               AND worker_id = $2
-              AND status IN ('claimed', 'running')
-              AND lease_expires_at > $3
+              AND status IN ($3, $4)
+              AND lease_expires_at > $5
         )
         "#,
         job_id,
         worker_id,
+        claimed,
+        running,
         now
     )
     .fetch_one(&state.db)
@@ -1084,8 +1161,10 @@ fn validate_claim_request(value: &ClaimJobRequest) -> Result<(), ApiError> {
     if value.available_slots < 0 {
         return Err(ApiError::bad_request("available_slots must be nonnegative"));
     }
-    if value.wait_seconds.unwrap_or(0) > 30 {
-        return Err(ApiError::bad_request("wait_seconds must be <= 30"));
+    if value.wait_seconds.unwrap_or(0) > MAX_CLAIM_WAIT_SECONDS {
+        return Err(ApiError::bad_request(format!(
+            "wait_seconds must be <= {MAX_CLAIM_WAIT_SECONDS}"
+        )));
     }
 
     Ok(())
@@ -1128,9 +1207,6 @@ fn validate_event_batch(value: &JobEventBatchRequest) -> Result<(), ApiError> {
 fn validate_result_request(value: &JobResultRequest) -> Result<(), ApiError> {
     const MAX_FEEDBACK_BYTES: usize = JOB_EVENT_MESSAGE_MAX_BYTES;
     const MAX_SUMMARY_BYTES: usize = JOB_EVENT_MESSAGE_MAX_BYTES;
-    const MAX_TESTS: usize = 512;
-    const MAX_ARTIFACTS: usize = 128;
-
     if value.result.schema_version != GRADING_RESULT_SCHEMA_VERSION {
         return Err(ApiError::bad_request("unsupported result schema_version"));
     }
@@ -1145,10 +1221,10 @@ fn validate_result_request(value: &JobResultRequest) -> Result<(), ApiError> {
             "result score must not exceed max_score",
         ));
     }
-    if value.result.tests.len() > MAX_TESTS {
+    if value.result.tests.len() > GRADING_RESULT_MAX_TESTS {
         return Err(ApiError::bad_request("too many tests in result"));
     }
-    if value.result.artifacts.len() > MAX_ARTIFACTS {
+    if value.result.artifacts.len() > GRADING_RESULT_MAX_ARTIFACTS {
         return Err(ApiError::bad_request("too many artifacts in result"));
     }
     if let Some(feedback) = &value.result.feedback
@@ -1196,7 +1272,7 @@ fn validate_failure_request(value: &JobFailureRequest) -> Result<(), ApiError> {
     if value.reason.trim().is_empty() {
         return Err(ApiError::bad_request("failure reason must not be empty"));
     }
-    if value.reason.len() > 128 {
+    if value.reason.len() > JOB_FAILURE_REASON_MAX_BYTES {
         return Err(ApiError::bad_request("failure reason too large"));
     }
     if value.message.len() > JOB_EVENT_MESSAGE_MAX_BYTES {

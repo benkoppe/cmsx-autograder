@@ -27,7 +27,7 @@ use cmsx_core::{
     ResultStatus, TestResult, WorkerAuthClaims,
     protocol::{
         GRADING_RESULT_SCHEMA_VERSION, JobEventStream, JobEventVisibility, WORKER_AUTH_SCHEME,
-        WORKER_JWT_AUDIENCE, job_event_type,
+        WORKER_JWT_AUDIENCE, WORKER_JWT_VALIDITY_SECONDS, job_event_type,
     },
 };
 
@@ -42,6 +42,10 @@ pub const TEST_ADMIN_TOKEN: &str = "cmsx_admin_test_secret";
 pub const TEST_ASSIGNMENT_SLUG: &str = "python-intro";
 pub const TEST_ASSIGNMENT_NAME: &str = "Python Intro";
 pub const TEST_WORKER_NAME: &str = "worker-1";
+const TEST_CMSX_MAX_BODY_BYTES: usize = 1024 * 1024;
+const TEST_CMSX_MAX_FIELD_BYTES: usize = 1024;
+const TEST_CMSX_MAX_FILE_BYTES: i64 = 1024 * 1024;
+const TEST_CMSX_MAX_FILES: usize = 16;
 
 pub struct TestQueuedJob {
     pub submission_id: Uuid,
@@ -115,10 +119,10 @@ pub async fn test_app_with_cmsx(configure_cmsx: impl FnOnce(&mut CmsxConfig)) ->
     let admin_hash = hash_test_token(TEST_ADMIN_TOKEN);
 
     let mut cmsx = CmsxConfig {
-        max_body_bytes: 1024 * 1024,
-        max_field_bytes: 1024,
-        max_file_bytes: 1024 * 1024,
-        max_files: 16,
+        max_body_bytes: TEST_CMSX_MAX_BODY_BYTES,
+        max_field_bytes: TEST_CMSX_MAX_FIELD_BYTES,
+        max_file_bytes: TEST_CMSX_MAX_FILE_BYTES,
+        max_files: TEST_CMSX_MAX_FILES,
     };
     configure_cmsx(&mut cmsx);
 
@@ -267,10 +271,13 @@ pub fn worker_authorization_header(
         body_sha256,
     };
 
-    let claims = Claims::with_custom_claims(custom, jwt_simple::prelude::Duration::from_secs(30))
-        .with_audience(WORKER_JWT_AUDIENCE)
-        .with_issuer(issuer)
-        .with_jwt_id(jti.to_string());
+    let claims = Claims::with_custom_claims(
+        custom,
+        jwt_simple::prelude::Duration::from_secs(WORKER_JWT_VALIDITY_SECONDS),
+    )
+    .with_audience(WORKER_JWT_AUDIENCE)
+    .with_issuer(issuer)
+    .with_jwt_id(jti.to_string());
 
     let token = key.sign(claims).expect("failed to sign worker token");
     let metadata = Token::decode_metadata(&token).expect("failed to decode worker token metadata");

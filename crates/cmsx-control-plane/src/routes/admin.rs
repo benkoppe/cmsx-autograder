@@ -16,6 +16,11 @@ use serde_json::{Value, json};
 use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
+use cmsx_core::{
+    WorkerStatus,
+    protocol::{ASSIGNMENT_NAME_MAX_BYTES, ASSIGNMENT_SLUG_MAX_BYTES, WORKER_NAME_MAX_BYTES},
+};
+
 use crate::{app::AppState, db, error::ApiError, workers};
 
 pub fn router() -> Router<AppState> {
@@ -699,14 +704,17 @@ pub async fn disable_worker(
     _admin: AdminAuth,
     Path(worker_id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
+    let disabled = WorkerStatus::Disabled.as_str();
+
     let update = sqlx::query!(
         r#"
         UPDATE workers
-        SET status = 'disabled'
+        SET status = $2
         WHERE id = $1
-          AND status != 'disabled'
+          AND status != $2
         "#,
         worker_id,
+        disabled,
     )
     .execute(&state.db)
     .await
@@ -750,8 +758,10 @@ fn validate_assignment_update(value: &UpdateAssignmentRequest) -> Result<(), Api
 }
 
 fn validate_slug(slug: &str) -> Result<(), ApiError> {
-    if slug.is_empty() || slug.len() > 128 {
-        return Err(ApiError::bad_request("slug must be 1-128 characters"));
+    if slug.is_empty() || slug.len() > ASSIGNMENT_SLUG_MAX_BYTES {
+        return Err(ApiError::bad_request(format!(
+            "slug must be 1-{ASSIGNMENT_SLUG_MAX_BYTES} characters"
+        )));
     }
 
     if !slug
@@ -771,10 +781,10 @@ fn validate_slug(slug: &str) -> Result<(), ApiError> {
 }
 
 fn validate_assignment_name(name: &str) -> Result<(), ApiError> {
-    if name.trim().is_empty() || name.len() > 256 {
-        return Err(ApiError::bad_request(
-            "assignment name must be 1-256 characters",
-        ));
+    if name.trim().is_empty() || name.len() > ASSIGNMENT_NAME_MAX_BYTES {
+        return Err(ApiError::bad_request(format!(
+            "assignment name must be 1-{ASSIGNMENT_NAME_MAX_BYTES} characters"
+        )));
     }
 
     Ok(())
@@ -799,10 +809,10 @@ fn validate_json_object(value: &Value, field: &str) -> Result<(), ApiError> {
 }
 
 fn validate_worker_name(name: &str) -> Result<(), ApiError> {
-    if name.trim().is_empty() || name.len() > 128 {
-        return Err(ApiError::bad_request(
-            "worker name must be 1-128 characters",
-        ));
+    if name.trim().is_empty() || name.len() > WORKER_NAME_MAX_BYTES {
+        return Err(ApiError::bad_request(format!(
+            "worker name must be 1-{WORKER_NAME_MAX_BYTES} characters"
+        )));
     }
 
     Ok(())
@@ -914,7 +924,10 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use cmsx_core::{ClaimJobRequest, JobEventBatchRequest, WorkerHeartbeatRequest, WorkerStatus};
+    use cmsx_core::{
+        ClaimJobRequest, JobEventBatchRequest, JobStatus, ResultStatus, WorkerHeartbeatRequest,
+        WorkerStatus, protocol::JOB_LEASE_SECONDS,
+    };
 
     use crate::test_support;
 
@@ -1114,7 +1127,7 @@ mod tests {
         .expect("failed to load worker");
 
         assert_eq!(worker.name, "worker-1");
-        assert_eq!(worker.status, "offline");
+        assert_eq!(worker.status, WorkerStatus::Offline.as_str());
 
         let key = sqlx::query!(
             r#"
@@ -1164,7 +1177,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK, "body={json}");
         assert_eq!(json["worker_id"], worker_json["worker_id"]);
-        assert_eq!(json["lease_seconds"], 60);
+        assert_eq!(json["lease_seconds"], JOB_LEASE_SECONDS);
     }
 
     #[tokio::test]
@@ -1327,8 +1340,8 @@ mod tests {
         .await
         .expect("failed to load stored result");
 
-        assert_eq!(stored.job_status, "succeeded");
-        assert_eq!(stored.result_status, "passed");
+        assert_eq!(stored.job_status, JobStatus::Succeeded.as_str());
+        assert_eq!(stored.result_status, ResultStatus::Passed.as_str());
         assert_eq!(stored.score, 100.0);
         assert_eq!(stored.max_score, 100.0);
 

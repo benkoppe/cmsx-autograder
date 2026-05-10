@@ -13,7 +13,7 @@ use uuid::Uuid;
 use cmsx_core::{
     ClaimedJob, GradingResult, JobEventBatchRequest, JobEventPayload, JobFailureRequest,
     JobResultRequest, ResultStatus,
-    protocol::{JOB_EVENT_MESSAGE_MAX_BYTES, cap_text, job_event_type},
+    protocol::{JOB_EVENT_MESSAGE_MAX_BYTES, cap_text, failure_reason, job_event_type},
 };
 
 use crate::{
@@ -30,16 +30,16 @@ use crate::{
     },
 };
 
-pub const FAILURE_INPUT_DOWNLOAD: &str = "input_download_failed";
-pub const FAILURE_INPUT_HASH: &str = "input_hash_mismatch";
-pub const FAILURE_GRADER_MISSING: &str = "grader_missing";
-pub const FAILURE_EXECUTOR_ERROR: &str = "executor_error";
-pub const FAILURE_RESULT_MISSING: &str = "result_missing";
-pub const FAILURE_RESULT_INVALID: &str = "result_invalid";
-pub const FAILURE_CANCELLED_BEFORE_START: &str = "cancelled_before_start";
-pub const FAILURE_TIMEOUT: &str = "timeout";
-pub const FAILURE_LEASE_LOST: &str = "lease_lost";
-pub const FAILURE_WORKSPACE_ERROR: &str = "workspace_error";
+pub const FAILURE_INPUT_DOWNLOAD: &str = failure_reason::INPUT_DOWNLOAD_FAILED;
+pub const FAILURE_INPUT_HASH: &str = failure_reason::INPUT_HASH_MISMATCH;
+pub const FAILURE_GRADER_MISSING: &str = failure_reason::GRADER_MISSING;
+pub const FAILURE_EXECUTOR_ERROR: &str = failure_reason::EXECUTOR_ERROR;
+pub const FAILURE_RESULT_MISSING: &str = failure_reason::RESULT_MISSING;
+pub const FAILURE_RESULT_INVALID: &str = failure_reason::RESULT_INVALID;
+pub const FAILURE_CANCELLED_BEFORE_START: &str = failure_reason::CANCELLED_BEFORE_START;
+pub const FAILURE_TIMEOUT: &str = failure_reason::TIMEOUT;
+pub const FAILURE_LEASE_LOST: &str = failure_reason::LEASE_LOST;
+pub const FAILURE_WORKSPACE_ERROR: &str = failure_reason::WORKSPACE_ERROR;
 
 pub const FAILURE_MESSAGE_MAX_BYTES: usize = JOB_EVENT_MESSAGE_MAX_BYTES;
 

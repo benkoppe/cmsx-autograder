@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 
 const KIB: usize = 1024;
 const GIB: usize = 1024 * 1024 * 1024;
+const DEFAULT_CMSX_MAX_BODY_BYTES: usize = 8 * GIB;
+const DEFAULT_CMSX_MAX_FIELD_BYTES: usize = 64 * KIB;
+const DEFAULT_CMSX_MAX_FILE_BYTES: i64 = (2 * GIB) as i64;
+const DEFAULT_CMSX_MAX_FILES: usize = 512;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -53,10 +57,10 @@ pub struct CmsxConfig {
 impl Default for CmsxConfig {
     fn default() -> Self {
         Self {
-            max_body_bytes: 8 * GIB,
-            max_field_bytes: 64 * KIB,
-            max_file_bytes: (2 * GIB) as i64,
-            max_files: 512,
+            max_body_bytes: DEFAULT_CMSX_MAX_BODY_BYTES,
+            max_field_bytes: DEFAULT_CMSX_MAX_FIELD_BYTES,
+            max_file_bytes: DEFAULT_CMSX_MAX_FILE_BYTES,
+            max_files: DEFAULT_CMSX_MAX_FILES,
         }
     }
 }

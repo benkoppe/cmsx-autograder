@@ -4,6 +4,7 @@ mod client;
 pub mod config;
 pub mod events;
 pub mod executor;
+pub mod job_contract;
 mod job_runner;
 pub mod worker;
 pub mod workspace;

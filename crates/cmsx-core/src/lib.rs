@@ -138,6 +138,20 @@ impl ResultStatus {
     }
 }
 
+impl std::str::FromStr for ResultStatus {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "passed" => Ok(Self::Passed),
+            "failed" => Ok(Self::Failed),
+            "error" => Ok(Self::Error),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestResult {
     pub name: String,
@@ -160,6 +174,29 @@ pub enum WorkerStatus {
     Online,
     Offline,
     Disabled,
+}
+
+impl WorkerStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Online => "online",
+            Self::Offline => "offline",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+impl std::str::FromStr for WorkerStatus {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "online" => Ok(Self::Online),
+            "offline" => Ok(Self::Offline),
+            "disabled" => Ok(Self::Disabled),
+            _ => Err(()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

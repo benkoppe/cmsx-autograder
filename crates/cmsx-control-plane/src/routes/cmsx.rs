@@ -17,6 +17,8 @@ use sha2::{Digest, Sha256};
 use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
+use cmsx_core::JobStatus;
+
 use crate::{app::AppState, error::ApiError};
 
 pub fn router(max_body_bytes: usize) -> Router<AppState> {
@@ -163,6 +165,8 @@ pub async fn submit(
             .await?;
         }
 
+        let queued = JobStatus::Queued.as_str();
+
         sqlx::query!(
             r#"
         INSERT INTO grading_jobs (
@@ -173,11 +177,12 @@ pub async fn submit(
             attempts,
             queued_at
         )
-        VALUES ($1, $2, $3, 'queued', 0, $4)
+        VALUES ($1, $2, $3, $4, 0, $5)
         "#,
             job_id,
             submission_id,
             assignment.id,
+            queued,
             now
         )
         .execute(&mut *tx)
@@ -1435,14 +1440,17 @@ mod tests {
             .submit(
                 TEST_SLUG,
                 CmsxSubmissionBuilder::default()
-                    .with_token("x".repeat(37))
+                    .with_token("x".repeat(CMSX_AUTH_TOKEN_MAX_CHARS + 1))
                     .multipart(),
             )
             .await;
         let (status, body) = response_json(response).await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"], "auth_token must be at most 36 characters");
+        assert_eq!(
+            body["error"],
+            format!("auth_token must be at most {CMSX_AUTH_TOKEN_MAX_CHARS} characters")
+        );
         assert_no_ingestion_writes(&test.db).await;
         assert_storage_has_no_files(test.storage_root.path());
     }
@@ -1455,7 +1463,7 @@ mod tests {
             .submit(
                 TEST_SLUG,
                 CmsxSubmissionBuilder::default()
-                    .with_token("é".repeat(36))
+                    .with_token("é".repeat(CMSX_AUTH_TOKEN_MAX_CHARS))
                     .multipart(),
             )
             .await;
@@ -1475,14 +1483,17 @@ mod tests {
             .submit(
                 TEST_SLUG,
                 CmsxSubmissionBuilder::default()
-                    .with_token("é".repeat(37))
+                    .with_token("é".repeat(CMSX_AUTH_TOKEN_MAX_CHARS + 1))
                     .multipart(),
             )
             .await;
         let (status, body) = response_json(response).await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"], "auth_token must be at most 36 characters");
+        assert_eq!(
+            body["error"],
+            format!("auth_token must be at most {CMSX_AUTH_TOKEN_MAX_CHARS} characters")
+        );
         assert_no_ingestion_writes(&test.db).await;
         assert_storage_has_no_files(test.storage_root.path());
     }

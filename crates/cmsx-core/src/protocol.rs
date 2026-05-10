@@ -7,6 +7,35 @@ pub const GRADING_RESULT_SCHEMA_VERSION: &str = "1";
 
 pub const WORKER_JWT_AUDIENCE: &str = "cmsx-control-plane";
 pub const WORKER_AUTH_SCHEME: &str = "WorkerJWT";
+pub const WORKER_JWT_VALIDITY_SECONDS: u64 = 30;
+pub const WORKER_JWT_MAX_VALIDITY_SECONDS: u64 = 60;
+pub const WORKER_JWT_TIME_TOLERANCE_SECONDS: u64 = 60;
+pub const WORKER_REQUEST_NONCE_RETENTION_SECONDS: i64 = 120;
+
+pub const JOB_LEASE_SECONDS: i64 = 60;
+pub const JOB_SWEEP_INTERVAL_SECONDS: u64 = 5;
+pub const MAX_CLAIM_WAIT_SECONDS: u64 = 30;
+
+pub const ASSIGNMENT_SLUG_MAX_BYTES: usize = 128;
+pub const ASSIGNMENT_NAME_MAX_BYTES: usize = 256;
+pub const WORKER_NAME_MAX_BYTES: usize = 128;
+pub const JOB_FAILURE_REASON_MAX_BYTES: usize = 128;
+pub const GRADING_RESULT_MAX_TESTS: usize = 512;
+pub const GRADING_RESULT_MAX_ARTIFACTS: usize = 128;
+
+pub mod failure_reason {
+    pub const INPUT_DOWNLOAD_FAILED: &str = "input_download_failed";
+    pub const INPUT_HASH_MISMATCH: &str = "input_hash_mismatch";
+    pub const GRADER_MISSING: &str = "grader_missing";
+    pub const EXECUTOR_ERROR: &str = "executor_error";
+    pub const RESULT_MISSING: &str = "result_missing";
+    pub const RESULT_INVALID: &str = "result_invalid";
+    pub const CANCELLED_BEFORE_START: &str = "cancelled_before_start";
+    pub const TIMEOUT: &str = "timeout";
+    pub const LEASE_LOST: &str = "lease_lost";
+    pub const LEASE_EXPIRED: &str = "lease_expired";
+    pub const WORKSPACE_ERROR: &str = "workspace_error";
+}
 
 pub mod job_event_type {
     pub const STDOUT: &str = "stdout";
