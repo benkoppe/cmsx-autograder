@@ -2,6 +2,7 @@ mod auth;
 mod capacity;
 mod client;
 pub mod config;
+pub mod events;
 pub mod executor;
 mod job_runner;
 pub mod worker;

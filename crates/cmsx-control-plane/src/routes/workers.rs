@@ -19,9 +19,13 @@ use cmsx_core::{
     ClaimJobRequest, ClaimJobResponse, ClaimedJob, ClaimedJobFile, JobEventBatchRequest,
     JobFailureRequest, JobResultRequest, StartedJobRequest, WorkerAuthClaims,
     WorkerHeartbeatRequest, WorkerHeartbeatResponse,
+    protocol::{
+        GRADING_RESULT_SCHEMA_VERSION, JOB_EVENT_BATCH_MAX_EVENTS, JOB_EVENT_MESSAGE_MAX_BYTES,
+        JobEventStream, JobEventVisibility, WORKER_AUTH_SCHEME, WORKER_JWT_AUDIENCE,
+    },
 };
 
-use crate::{app::AppState, error::ApiError};
+use crate::{app::AppState, db, error::ApiError};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -36,10 +40,7 @@ pub fn router() -> Router<AppState> {
 }
 
 const WORKER_REQUEST_MAX_BYTES: usize = 1024 * 1024;
-const WORKER_EVENT_BATCH_MAX_EVENTS: usize = 512;
-const WORKER_EVENT_MESSAGE_MAX_BYTES: usize = 64 * 1024;
 
-const WORKER_AUDIENCE: &str = "cmsx-control-plane";
 const LEASE_SECONDS: i64 = 60;
 
 #[derive(Debug, Clone)]
@@ -117,8 +118,13 @@ fn worker_token_from_headers(headers: &HeaderMap) -> Result<&str, ApiError> {
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| ApiError::unauthorized("missing worker authorization"))?;
 
-    auth_header
-        .strip_prefix("WorkerJWT ")
+    let Some(rest) = auth_header.strip_prefix(WORKER_AUTH_SCHEME) else {
+        return Err(ApiError::unauthorized(
+            "invalid worker authorization scheme",
+        ));
+    };
+
+    rest.strip_prefix(' ')
         .ok_or_else(|| ApiError::unauthorized("invalid worker authorization scheme"))
 }
 
@@ -157,7 +163,7 @@ async fn verify_worker_jwt(
         let public_key = Ed25519PublicKey::from_pem(&key.public_key).map_err(ApiError::internal)?;
 
         let options = VerificationOptions {
-            allowed_audiences: Some(HashSet::from([WORKER_AUDIENCE.to_string()])),
+            allowed_audiences: Some(HashSet::from([WORKER_JWT_AUDIENCE.to_string()])),
             required_key_id: Some(fingerprint.clone()),
             time_tolerance: Some(jwt_simple::prelude::Duration::from_secs(60)),
             max_validity: Some(jwt_simple::prelude::Duration::from_secs(60)),
@@ -228,7 +234,7 @@ async fn record_worker_jti(state: &AppState, worker_id: Uuid, jti: Uuid) -> Resu
     .await;
 
     if let Err(error) = insert {
-        if is_unique_violation(&error) {
+        if db::is_unique_violation(&error) {
             return Err(ApiError::unauthorized("replayed worker token"));
         }
 
@@ -775,7 +781,7 @@ pub async fn post_events(
         .await;
 
         if let Err(error) = result {
-            if is_unique_violation(&error) {
+            if db::is_unique_violation(&error) {
                 return Err(ApiError::bad_request("duplicate event sequence"));
             }
 
@@ -788,14 +794,6 @@ pub async fn post_events(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    let Some(db_error) = error.as_database_error() else {
-        return false;
-    };
-
-    db_error.code().as_deref() == Some("23505")
-}
-
 pub async fn post_result(
     State(state): State<AppState>,
     Path(job_id): Path<Uuid>,
@@ -805,19 +803,8 @@ pub async fn post_result(
 
     let now = Utc::now();
 
-    let result_status = match value.result.status {
-        cmsx_core::ResultStatus::Passed => "passed",
-        cmsx_core::ResultStatus::Failed => "failed",
-        cmsx_core::ResultStatus::Error => "error",
-        cmsx_core::ResultStatus::Cancelled => "cancelled",
-    };
-
-    let job_status = match value.result.status {
-        cmsx_core::ResultStatus::Passed => "succeeded",
-        cmsx_core::ResultStatus::Failed => "failed",
-        cmsx_core::ResultStatus::Error => "error",
-        cmsx_core::ResultStatus::Cancelled => "cancelled",
-    };
+    let result_status = value.result.status.as_str();
+    let job_status = value.result.status.terminal_job_status().as_str();
 
     let result_json = serde_json::to_value(&value.result).map_err(ApiError::internal)?;
     let tests_json = serde_json::to_value(&value.result.tests).map_err(ApiError::internal)?;
@@ -1051,7 +1038,7 @@ fn validate_event_batch(value: &JobEventBatchRequest) -> Result<(), ApiError> {
     if value.events.is_empty() {
         return Err(ApiError::bad_request("events must not be empty"));
     }
-    if value.events.len() > WORKER_EVENT_BATCH_MAX_EVENTS {
+    if value.events.len() > JOB_EVENT_BATCH_MAX_EVENTS {
         return Err(ApiError::bad_request("too many events in batch"));
     }
 
@@ -1067,16 +1054,13 @@ fn validate_event_batch(value: &JobEventBatchRequest) -> Result<(), ApiError> {
         if event.event_type.trim().is_empty() {
             return Err(ApiError::bad_request("event type must not be empty"));
         }
-        if event.message.len() > WORKER_EVENT_MESSAGE_MAX_BYTES {
+        if event.message.len() > JOB_EVENT_MESSAGE_MAX_BYTES {
             return Err(ApiError::bad_request("event message too large"));
         }
-        if !matches!(
-            event.stream.as_str(),
-            "stdout" | "stderr" | "worker" | "resource"
-        ) {
+        if !JobEventStream::is_valid(&event.stream) {
             return Err(ApiError::bad_request("invalid event stream"));
         }
-        if !matches!(event.visibility.as_str(), "student" | "staff" | "internal") {
+        if !JobEventVisibility::is_valid(&event.visibility) {
             return Err(ApiError::bad_request("invalid event visibility"));
         }
     }
@@ -1085,12 +1069,12 @@ fn validate_event_batch(value: &JobEventBatchRequest) -> Result<(), ApiError> {
 }
 
 fn validate_result_request(value: &JobResultRequest) -> Result<(), ApiError> {
-    const MAX_FEEDBACK_BYTES: usize = 64 * 1024;
-    const MAX_SUMMARY_BYTES: usize = 64 * 1024;
+    const MAX_FEEDBACK_BYTES: usize = JOB_EVENT_MESSAGE_MAX_BYTES;
+    const MAX_SUMMARY_BYTES: usize = JOB_EVENT_MESSAGE_MAX_BYTES;
     const MAX_TESTS: usize = 512;
     const MAX_ARTIFACTS: usize = 128;
 
-    if value.result.schema_version != "1" {
+    if value.result.schema_version != GRADING_RESULT_SCHEMA_VERSION {
         return Err(ApiError::bad_request("unsupported result schema_version"));
     }
     if !value.result.score.is_finite() || !value.result.max_score.is_finite() {
@@ -1158,7 +1142,7 @@ fn validate_failure_request(value: &JobFailureRequest) -> Result<(), ApiError> {
     if value.reason.len() > 128 {
         return Err(ApiError::bad_request("failure reason too large"));
     }
-    if value.message.len() > 64 * 1024 {
+    if value.message.len() > JOB_EVENT_MESSAGE_MAX_BYTES {
         return Err(ApiError::bad_request("failure message too large"));
     }
 

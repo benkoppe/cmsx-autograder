@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 use cmsx_core::{ClaimedJob, ResultStatus};
 use cmsx_worker::{
     config::InWorkerExecutorConfig,
+    events::ExecutorEventSink,
     executor::{ExecutionStatus, InWorkerExecutor},
 };
 
@@ -98,6 +99,7 @@ async fn successful_grader_writes_result_json() {
             &fixture.job(60),
             &fixture.parent.workspace,
             CancellationToken::new(),
+            ExecutorEventSink::noop(),
         )
         .await
         .expect("executor failed");
@@ -109,9 +111,7 @@ async fn successful_grader_writes_result_json() {
 
     let result = fixture.parent.read_result().await;
 
-    assert!(matches!(result.status, ResultStatus::Passed));
-    assert_eq!(result.score, 10.0);
-    assert_eq!(result.max_score, 10.0);
+    common::passed_score(&result, 10.0, 10.0);
     assert_eq!(result.tests.len(), 1);
 }
 
@@ -142,6 +142,7 @@ async fn executor_sets_expected_environment_and_cwd() {
             &fixture.job(60),
             &fixture.parent.workspace,
             CancellationToken::new(),
+            ExecutorEventSink::noop(),
         )
         .await
         .expect("executor failed");
@@ -153,8 +154,7 @@ async fn executor_sets_expected_environment_and_cwd() {
 
     let result = fixture.parent.read_result().await;
 
-    assert!(matches!(result.status, ResultStatus::Passed));
-    assert_eq!(result.score, 4.0);
+    common::passed_score(&result, 4.0, 4.0);
 }
 
 #[tokio::test]
@@ -207,6 +207,7 @@ async fn grader_can_read_submission_files_and_metadata() {
             &fixture.job(60),
             &fixture.parent.workspace,
             CancellationToken::new(),
+            ExecutorEventSink::noop(),
         )
         .await
         .expect("executor failed");
@@ -218,8 +219,7 @@ async fn grader_can_read_submission_files_and_metadata() {
 
     let result = fixture.parent.read_result().await;
 
-    assert!(matches!(result.status, ResultStatus::Passed));
-    assert_eq!(result.score, 3.0);
+    common::passed_score(&result, 3.0, 3.0);
 }
 
 #[tokio::test]
@@ -237,6 +237,7 @@ async fn grader_exception_writes_error_result_and_exits_nonzero() {
             &fixture.job(60),
             &fixture.parent.workspace,
             CancellationToken::new(),
+            ExecutorEventSink::noop(),
         )
         .await
         .expect("executor failed");
@@ -285,6 +286,7 @@ async fn stdout_and_stderr_are_captured() {
             &fixture.job(60),
             &fixture.parent.workspace,
             CancellationToken::new(),
+            ExecutorEventSink::noop(),
         )
         .await
         .expect("executor failed");
@@ -326,6 +328,7 @@ async fn nonzero_process_exit_with_valid_result_is_returned_as_exited() {
             &fixture.job(60),
             &fixture.parent.workspace,
             CancellationToken::new(),
+            ExecutorEventSink::noop(),
         )
         .await
         .expect("executor failed");
@@ -363,6 +366,7 @@ async fn timeout_kills_real_sdk_process() {
             &fixture.job(1),
             &fixture.parent.workspace,
             CancellationToken::new(),
+            ExecutorEventSink::noop(),
         )
         .await
         .expect("executor failed");
@@ -393,7 +397,12 @@ async fn cancellation_kills_real_sdk_process() {
 
     let output = fixture
         .executor()
-        .run(&fixture.job(60), &fixture.parent.workspace, cancel)
+        .run(
+            &fixture.job(60),
+            &fixture.parent.workspace,
+            cancel,
+            ExecutorEventSink::noop(),
+        )
         .await
         .expect("executor failed");
 

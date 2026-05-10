@@ -567,7 +567,7 @@ pub async fn read_bounded_result_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cmsx_core::{ClaimedJobFile, ResultStatus};
+    use cmsx_core::{ClaimedJobFile, ResultStatus, protocol::GRADING_RESULT_SCHEMA_VERSION};
     use serde_json::json;
     use tempfile::TempDir;
     use tokio::io::AsyncWriteExt;
@@ -1023,7 +1023,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let result_path = temp.path().join("result.json");
         let result = json!({
-            "schema_version": "1",
+            "schema_version": GRADING_RESULT_SCHEMA_VERSION,
             "status": "passed",
             "score": 1.0,
             "max_score": 1.0,

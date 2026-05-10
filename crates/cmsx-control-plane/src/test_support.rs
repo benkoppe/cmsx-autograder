@@ -25,6 +25,10 @@ use uuid::Uuid;
 use cmsx_core::{
     ClaimJobRequest, GradingResult, JobEventBatchRequest, JobEventPayload, JobResultRequest,
     ResultStatus, TestResult, WorkerAuthClaims,
+    protocol::{
+        GRADING_RESULT_SCHEMA_VERSION, JobEventStream, JobEventVisibility, WORKER_AUTH_SCHEME,
+        WORKER_JWT_AUDIENCE, job_event_type,
+    },
 };
 
 use crate::{
@@ -33,8 +37,6 @@ use crate::{
     db,
     storage::Storage,
 };
-
-const WORKER_AUDIENCE: &str = "cmsx-control-plane";
 
 pub const TEST_ADMIN_TOKEN: &str = "cmsx_admin_test_secret";
 pub const TEST_ASSIGNMENT_SLUG: &str = "python-intro";
@@ -266,14 +268,14 @@ pub fn worker_authorization_header(
     };
 
     let claims = Claims::with_custom_claims(custom, jwt_simple::prelude::Duration::from_secs(30))
-        .with_audience(WORKER_AUDIENCE)
+        .with_audience(WORKER_JWT_AUDIENCE)
         .with_issuer(issuer)
         .with_jwt_id(jti.to_string());
 
     let token = key.sign(claims).expect("failed to sign worker token");
     let metadata = Token::decode_metadata(&token).expect("failed to decode worker token metadata");
     assert_eq!(metadata.key_id(), Some(fingerprint.as_str()));
-    format!("WorkerJWT {token}")
+    format!("{WORKER_AUTH_SCHEME} {token}")
 }
 
 pub fn worker_public_key_fingerprint(private_key_base64: &str) -> String {
@@ -479,10 +481,10 @@ pub async fn post_test_job_events(
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 }
 
-pub async fn post_test_job_result(app: &TestApp, job: &TestClaimedJob) {
-    let result = JobResultRequest {
+pub fn test_job_result_request() -> JobResultRequest {
+    JobResultRequest {
         result: GradingResult {
-            schema_version: "1".to_string(),
+            schema_version: GRADING_RESULT_SCHEMA_VERSION.to_string(),
             status: ResultStatus::Passed,
             score: 100.0,
             max_score: 100.0,
@@ -499,13 +501,15 @@ pub async fn post_test_job_result(app: &TestApp, job: &TestClaimedJob) {
         duration_ms: Some(123),
         stdout_summary: Some("stdout".to_string()),
         stderr_summary: None,
-    };
+    }
+}
 
+pub async fn post_test_job_result(app: &TestApp, job: &TestClaimedJob) {
     let response = worker_post_json(
         &app.app,
         &job.private_key,
         &format!("/workers/jobs/{}/result", job.job_id),
-        &result,
+        &test_job_result_request(),
     )
     .await;
 
@@ -517,16 +521,16 @@ pub fn test_event(sequence: i64, message: &str) -> JobEventPayload {
         sequence,
         timestamp: now_event_timestamp(),
         event_type: if sequence == 0 {
-            "job.started".to_string()
+            job_event_type::JOB_STARTED.to_string()
         } else {
-            "stdout".to_string()
+            job_event_type::STDOUT.to_string()
         },
         stream: if sequence == 0 {
-            "worker".to_string()
+            JobEventStream::Worker.as_str().to_string()
         } else {
-            "stdout".to_string()
+            JobEventStream::Stdout.as_str().to_string()
         },
-        visibility: "staff".to_string(),
+        visibility: JobEventVisibility::Staff.as_str().to_string(),
         message: message.to_string(),
         data: json!({}),
     }

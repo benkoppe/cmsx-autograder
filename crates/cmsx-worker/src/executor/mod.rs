@@ -5,9 +5,9 @@ pub mod utils;
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
-use cmsx_core::ClaimedJob;
+use cmsx_core::{ClaimedJob, GradingResult};
 
-use crate::workspace::JobWorkspace;
+use crate::{events::ExecutorEventSink, workspace::JobWorkspace};
 
 pub use docker_socket::DockerSocketExecutor;
 pub use in_worker::InWorkerExecutor;
@@ -39,10 +39,11 @@ impl Executor {
         job: &ClaimedJob,
         workspace: &JobWorkspace,
         cancel: CancellationToken,
+        event_sink: ExecutorEventSink,
     ) -> Result<ExecutionOutput> {
         match self {
-            Self::DockerSocket(executor) => executor.run(job, workspace, cancel).await,
-            Self::InWorker(executor) => executor.run(job, workspace, cancel).await,
+            Self::DockerSocket(executor) => executor.run(job, workspace, cancel, event_sink).await,
+            Self::InWorker(executor) => executor.run(job, workspace, cancel, event_sink).await,
         }
     }
 
@@ -52,4 +53,10 @@ impl Executor {
             Self::InWorker(_) => "in-worker",
         }
     }
+}
+
+pub fn passed_score(result: &GradingResult, score: f64, max_score: f64) {
+    assert!(matches!(result.status, cmsx_core::ResultStatus::Passed));
+    assert_eq!(result.score, score);
+    assert_eq!(result.max_score, max_score);
 }

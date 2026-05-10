@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
-use crate::{app::AppState, error::ApiError, workers};
+use crate::{app::AppState, db, error::ApiError, workers};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -273,7 +273,7 @@ pub async fn create_assignment(
     .fetch_one(&state.db)
     .await
     .map_err(|error| {
-        if is_unique_violation(&error) {
+        if db::is_unique_violation(&error) {
             ApiError::conflict("assignment slug already exists")
         } else {
             ApiError::internal(error)
@@ -908,24 +908,13 @@ fn worker_response(row: WorkerRow) -> WorkerResponse {
     }
 }
 
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    let Some(db_error) = error.as_database_error() else {
-        return false;
-    };
-
-    db_error.code().as_deref() == Some("23505")
-}
-
 #[cfg(test)]
 mod tests {
     use axum::http::StatusCode;
     use serde_json::json;
     use uuid::Uuid;
 
-    use cmsx_core::{
-        ClaimJobRequest, GradingResult, JobEventBatchRequest, JobEventPayload, JobResultRequest,
-        ResultStatus, TestResult, WorkerHeartbeatRequest, WorkerStatus,
-    };
+    use cmsx_core::{ClaimJobRequest, JobEventBatchRequest, WorkerHeartbeatRequest, WorkerStatus};
 
     use crate::test_support;
 
@@ -1296,15 +1285,7 @@ mod tests {
         assert_eq!(started_response.status(), StatusCode::NO_CONTENT);
 
         let events = JobEventBatchRequest {
-            events: vec![JobEventPayload {
-                sequence: 0,
-                timestamp: test_support::now_event_timestamp(),
-                event_type: "job.started".to_string(),
-                stream: "worker".to_string(),
-                visibility: "staff".to_string(),
-                message: "Job started".to_string(),
-                data: json!({}),
-            }],
+            events: vec![test_support::test_event(0, "Job started")],
         };
 
         let events_response = test_support::worker_post_json(
@@ -1316,26 +1297,7 @@ mod tests {
         .await;
         assert_eq!(events_response.status(), StatusCode::NO_CONTENT);
 
-        let result = JobResultRequest {
-            result: GradingResult {
-                schema_version: "1".to_string(),
-                status: ResultStatus::Passed,
-                score: 100.0,
-                max_score: 100.0,
-                feedback: Some("Looks good".to_string()),
-                tests: vec![TestResult {
-                    name: "smoke".to_string(),
-                    status: ResultStatus::Passed,
-                    score: 100.0,
-                    max_score: 100.0,
-                    message: Some("ok".to_string()),
-                }],
-                artifacts: vec![],
-            },
-            duration_ms: Some(123),
-            stdout_summary: Some("stdout".to_string()),
-            stderr_summary: None,
-        };
+        let result = test_support::test_job_result_request();
 
         let result_response = test_support::worker_post_json(
             &app.app,

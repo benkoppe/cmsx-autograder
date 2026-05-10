@@ -3,9 +3,10 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use jwt_simple::prelude::*;
 use sha2::{Digest, Sha256};
 
-use cmsx_core::WorkerAuthClaims;
-
-const WORKER_AUDIENCE: &str = "cmsx-control-plane";
+use cmsx_core::{
+    WorkerAuthClaims,
+    protocol::{WORKER_AUTH_SCHEME, WORKER_JWT_AUDIENCE},
+};
 
 #[derive(Clone)]
 pub struct WorkerSigner {
@@ -42,12 +43,12 @@ impl WorkerSigner {
 
         let claims =
             Claims::with_custom_claims(custom, jwt_simple::prelude::Duration::from_secs(30))
-                .with_audience(WORKER_AUDIENCE)
+                .with_audience(WORKER_JWT_AUDIENCE)
                 .with_issuer(issuer)
                 .with_jwt_id(jti.to_string());
 
         let token = self.key.sign(claims).context("failed to sign worker jwt")?;
-        Ok(format!("WorkerJWT {token}"))
+        Ok(format!("{WORKER_AUTH_SCHEME} {token}"))
     }
 }
 

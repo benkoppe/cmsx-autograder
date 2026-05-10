@@ -1,3 +1,5 @@
+pub mod protocol;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -40,6 +42,20 @@ pub enum JobStatus {
     Cancelled,
 }
 
+impl JobStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Claimed => "claimed",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Error => "error",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobEvent {
     pub job_id: Uuid,
@@ -70,6 +86,26 @@ pub enum ResultStatus {
     Failed,
     Error,
     Cancelled,
+}
+
+impl ResultStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Error => "error",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn terminal_job_status(&self) -> JobStatus {
+        match self {
+            Self::Passed => JobStatus::Succeeded,
+            Self::Failed => JobStatus::Failed,
+            Self::Error => JobStatus::Error,
+            Self::Cancelled => JobStatus::Cancelled,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
