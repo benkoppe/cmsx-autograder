@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE workers\n        SET status = $2\n        WHERE id = $1\n          AND status != $2\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "004564cba148776c19316c8adea9a1721e0ed992447b4cb9944b5afb857dd2e8"
+}

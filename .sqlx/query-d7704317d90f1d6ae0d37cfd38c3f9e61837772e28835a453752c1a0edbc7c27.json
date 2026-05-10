@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT EXISTS (\n                SELECT 1\n                FROM grading_jobs\n                WHERE id = $1\n                  AND worker_id = $2\n                  AND status = $4\n                  AND lease_expires_at > $3\n                  AND cancel_requested_at IS NOT NULL\n            )\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "d7704317d90f1d6ae0d37cfd38c3f9e61837772e28835a453752c1a0edbc7c27"
+}

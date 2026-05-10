@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE workers\n        SET status = $2,\n            version = $3,\n            last_seen_at = $4\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3e8d76e3fba8563f8d063eb008b1ddeca7a940d5b7ca204ad1b4c6237eb17f02"
+}

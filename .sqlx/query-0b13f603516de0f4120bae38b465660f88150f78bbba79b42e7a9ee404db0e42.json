@@ -1,0 +1,94 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            grading_jobs.id AS job_id,\n            grading_jobs.status AS job_status,\n            grading_jobs.attempts,\n            grading_results.status AS result_status,\n            grading_results.score,\n            grading_results.max_score,\n            grading_results.feedback,\n            grading_results.tests AS \"tests: SqlxJson<Value>\",\n            grading_results.result AS \"result: SqlxJson<Value>\",\n            grading_results.stdout_summary,\n            grading_results.stderr_summary,\n            grading_results.duration_ms,\n            grading_results.created_at\n        FROM grading_results\n        JOIN grading_jobs ON grading_jobs.id = grading_results.job_id\n        WHERE grading_jobs.submission_id = $1\n        ORDER BY grading_results.created_at DESC, grading_results.id DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "job_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "job_status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "result_status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "score",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 5,
+        "name": "max_score",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 6,
+        "name": "feedback",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "tests: SqlxJson<Value>",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 8,
+        "name": "result: SqlxJson<Value>",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 9,
+        "name": "stdout_summary",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "stderr_summary",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "duration_ms",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 12,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "0b13f603516de0f4120bae38b465660f88150f78bbba79b42e7a9ee404db0e42"
+}

@@ -1,0 +1,172 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            grading_jobs.id,\n            grading_jobs.submission_id,\n            grading_jobs.assignment_id,\n            assignments.slug AS assignment_slug,\n            assignments.name AS assignment_name,\n            grading_jobs.worker_id,\n            workers.name AS \"worker_name?\",\n            grading_jobs.status,\n            grading_jobs.attempts,\n            grading_jobs.max_attempts,\n            grading_jobs.queued_at,\n            grading_jobs.claimed_at,\n            grading_jobs.started_at,\n            grading_jobs.finished_at,\n            grading_jobs.lease_expires_at,\n            grading_jobs.last_heartbeat_at,\n            grading_jobs.cancel_requested_at,\n            grading_jobs.cancel_expires_at,\n            grading_jobs.failure_reason,\n            grading_jobs.failure_message,\n            grading_jobs.failure_retryable,\n            grading_results.status AS \"result_status?\",\n            grading_results.score AS \"result_score?\",\n            grading_results.max_score AS \"result_max_score?\",\n            grading_results.duration_ms AS \"result_duration_ms?\",\n            grading_results.created_at AS \"result_created_at?\"\n        FROM grading_jobs\n        JOIN assignments ON assignments.id = grading_jobs.assignment_id\n        LEFT JOIN workers ON workers.id = grading_jobs.worker_id\n        LEFT JOIN grading_results ON grading_results.job_id = grading_jobs.id\n        WHERE grading_jobs.id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "submission_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "assignment_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "assignment_slug",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "assignment_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "worker_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "worker_name?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "max_attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 10,
+        "name": "queued_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "claimed_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "started_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 13,
+        "name": "finished_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 14,
+        "name": "lease_expires_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 15,
+        "name": "last_heartbeat_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 16,
+        "name": "cancel_requested_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 17,
+        "name": "cancel_expires_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 18,
+        "name": "failure_reason",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 19,
+        "name": "failure_message",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 20,
+        "name": "failure_retryable",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 21,
+        "name": "result_status?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 22,
+        "name": "result_score?",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 23,
+        "name": "result_max_score?",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 24,
+        "name": "result_duration_ms?",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 25,
+        "name": "result_created_at?",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "e50f2e2bab97867077782360be5fdd954a257feabaab9fe4f9a0912f838ee524"
+}

@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO worker_heartbeats (\n            id,\n            worker_id,\n            status,\n            version,\n            running_jobs,\n            max_jobs,\n            reported_at\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, $7)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Int4",
+        "Int4",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "49d5674f3692957b4fab586d3ed303cfc005a4af3fc21f88651b4154182df0f3"
+}

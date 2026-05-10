@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            grading_jobs.id,\n            grading_jobs.submission_id,\n            grading_jobs.assignment_id,\n            assignments.slug AS assignment_slug,\n            grading_jobs.lease_expires_at,\n            grading_jobs.attempts,\n            assignments.execution_config AS \"execution_config: SqlxJson<Value>\",\n            assignments.runner_config AS \"runner_config: SqlxJson<Value>\",\n            assignments.capabilities AS \"capabilities: SqlxJson<Value>\",\n            submissions.raw_metadata AS \"raw_metadata: SqlxJson<Value>\"\n        FROM grading_jobs\n        JOIN assignments ON assignments.id = grading_jobs.assignment_id\n        JOIN submissions ON submissions.id = grading_jobs.submission_id\n        WHERE grading_jobs.id = $1\n          AND grading_jobs.worker_id = $2\n          AND grading_jobs.status IN ('claimed', 'running')\n        ",
+  "query": "\n        SELECT\n            grading_jobs.id,\n            grading_jobs.submission_id,\n            grading_jobs.assignment_id,\n            assignments.slug AS assignment_slug,\n            grading_jobs.lease_expires_at,\n            grading_jobs.attempts,\n            assignments.execution_config AS \"execution_config: SqlxJson<Value>\",\n            assignments.runner_config AS \"runner_config: SqlxJson<Value>\",\n            assignments.capabilities AS \"capabilities: SqlxJson<Value>\",\n            submissions.raw_metadata AS \"raw_metadata: SqlxJson<Value>\"\n        FROM grading_jobs\n        JOIN assignments ON assignments.id = grading_jobs.assignment_id\n        JOIN submissions ON submissions.id = grading_jobs.submission_id\n        WHERE grading_jobs.id = $1\n          AND grading_jobs.worker_id = $2\n          AND grading_jobs.status IN ($3, $4)\n        ",
   "describe": {
     "columns": [
       {
@@ -57,7 +57,9 @@
     "parameters": {
       "Left": [
         "Uuid",
-        "Uuid"
+        "Uuid",
+        "Text",
+        "Text"
       ]
     },
     "nullable": [
@@ -73,5 +75,5 @@
       false
     ]
   },
-  "hash": "bcdd61a396ee705bdcaffac85534056c3f2c63e21ddd1cab11014d1c1843cf21"
+  "hash": "8b0da5fd0f5b79ddbe309816fc16b018573d3a673313bd4077fb5d8089435d00"
 }

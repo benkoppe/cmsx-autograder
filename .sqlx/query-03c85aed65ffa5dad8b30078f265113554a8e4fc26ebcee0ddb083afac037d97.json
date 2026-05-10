@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH candidate AS (\n            SELECT grading_jobs.id\n            FROM grading_jobs\n            WHERE (\n                (\n                    grading_jobs.status = $5\n                    AND grading_jobs.cancel_requested_at IS NULL\n                )\n                OR (\n                    grading_jobs.status IN ($6, $7)\n                    AND grading_jobs.lease_expires_at <= $2\n                    AND grading_jobs.attempts < grading_jobs.max_attempts\n                    AND grading_jobs.cancel_requested_at IS NULL\n                )\n            )\n            ORDER BY grading_jobs.queued_at\n            FOR UPDATE SKIP LOCKED\n            LIMIT $3\n        )\n        UPDATE grading_jobs\n        SET status = $8,\n            worker_id = $1,\n            attempts = attempts + 1,\n            claimed_at = $2,\n            started_at = NULL,\n            finished_at = NULL,\n            lease_expires_at = $4,\n            last_heartbeat_at = $2,\n            failure_reason = NULL,\n            failure_message = NULL,\n            failure_retryable = NULL\n        FROM candidate\n        WHERE grading_jobs.id = candidate.id\n        RETURNING\n            grading_jobs.id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz",
+        "Int8",
+        "Timestamptz",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "03c85aed65ffa5dad8b30078f265113554a8e4fc26ebcee0ddb083afac037d97"
+}

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE grading_jobs\n                SET status = $3,\n                    cancel_requested_at = COALESCE(cancel_requested_at, $2),\n                    cancel_expires_at = NULL,\n                    finished_at = $2,\n                    lease_expires_at = NULL,\n                    worker_id = NULL,\n                    claimed_at = NULL,\n                    started_at = NULL,\n                    last_heartbeat_at = NULL\n                WHERE id = $1\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "971cb15fd238d9495dcb8daba3234422cb1a1f651d6fa3b9f3b74313e3cd2b3b"
+}

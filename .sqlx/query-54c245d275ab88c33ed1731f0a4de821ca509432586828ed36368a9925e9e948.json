@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE grading_jobs\n                SET cancel_requested_at = $2,\n                    cancel_expires_at = $3,\n                    lease_expires_at = GREATEST(\n                        COALESCE(lease_expires_at, $3),\n                        $3\n                    )\n                WHERE id = $1\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "54c245d275ab88c33ed1731f0a4de821ca509432586828ed36368a9925e9e948"
+}

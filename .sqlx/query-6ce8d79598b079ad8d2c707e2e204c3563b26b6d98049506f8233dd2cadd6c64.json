@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE grading_jobs\n        SET status = $2,\n            finished_at = $1,\n            lease_expires_at = NULL,\n            failure_reason = $5,\n            failure_message = 'job lease expired and max attempts were exhausted',\n            failure_retryable = false\n        WHERE status IN ($3, $4)\n          AND lease_expires_at <= $1\n          AND cancel_requested_at IS NULL\n          AND attempts >= max_attempts\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6ce8d79598b079ad8d2c707e2e204c3563b26b6d98049506f8233dd2cadd6c64"
+}

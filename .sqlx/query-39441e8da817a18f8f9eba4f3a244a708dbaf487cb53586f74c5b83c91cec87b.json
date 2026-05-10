@@ -1,0 +1,101 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            submissions.id,\n            submissions.assignment_id,\n            assignments.slug AS assignment_slug,\n            submissions.cmsx_group_id,\n            submissions.cmsx_assignment_id,\n            submissions.cmsx_assignment_name,\n            submissions.netids_raw,\n            submissions.received_at,\n            COUNT(submission_files.id) AS \"file_count!\",\n            latest_job.id AS \"latest_job_id?\",\n            latest_job.status AS \"latest_job_status?\",\n            latest_job.queued_at AS \"latest_job_queued_at?\",\n            latest_job.started_at AS \"latest_job_started_at?\",\n            latest_job.finished_at AS \"latest_job_finished_at?\"\n        FROM submissions\n        JOIN assignments ON assignments.id = submissions.assignment_id\n        LEFT JOIN submission_files ON submission_files.submission_id = submissions.id\n        LEFT JOIN LATERAL (\n            SELECT id, status, queued_at, started_at, finished_at\n            FROM grading_jobs\n            WHERE grading_jobs.submission_id = submissions.id\n            ORDER BY queued_at DESC, id DESC\n            LIMIT 1\n        ) AS latest_job ON true\n        WHERE submissions.assignment_id = $1\n        GROUP BY\n            submissions.id,\n            assignments.slug,\n            latest_job.id,\n            latest_job.status,\n            latest_job.queued_at,\n            latest_job.started_at,\n            latest_job.finished_at\n        ORDER BY submissions.received_at DESC, submissions.id DESC\n        LIMIT $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "assignment_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "assignment_slug",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "cmsx_group_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "cmsx_assignment_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "cmsx_assignment_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "netids_raw",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "received_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "file_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "latest_job_id?",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 10,
+        "name": "latest_job_status?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "latest_job_queued_at?",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "latest_job_started_at?",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 13,
+        "name": "latest_job_finished_at?",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      null,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "39441e8da817a18f8f9eba4f3a244a708dbaf487cb53586f74c5b83c91cec87b"
+}

@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT worker_keys.worker_id, worker_keys.public_key\n        FROM worker_keys\n        JOIN workers ON workers.id = worker_keys.worker_id\n        WHERE worker_keys.public_key_fingerprint = $1\n          AND worker_keys.revoked_at IS NULL\n          AND workers.status != $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "worker_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "public_key",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "36763cc467e9da8022502975657158e6d9b895b59a96f1972affda636f8b8691"
+}

@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE grading_jobs\n                SET lease_expires_at = $5,\n                    last_heartbeat_at = $6\n                WHERE id = $1\n                  AND worker_id = $2\n                  AND status IN ($3, $4)\n                  AND cancel_requested_at IS NOT NULL\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e351b10b9ecaeab07a9ceccb0ca7d846962c79eed8e8b1ebe1992dbf4f07a1bd"
+}
