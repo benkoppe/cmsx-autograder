@@ -1447,7 +1447,7 @@ fn required_header<'a>(
     headers
         .get(name)
         .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| ArtifactRouteError::invalid_metadata(format!("missing {name} header")))
+        .ok_or_else(|| ArtifactRouteError::invalid_metadata("missing {name} header"))
 }
 
 async fn load_active_artifact_job(
