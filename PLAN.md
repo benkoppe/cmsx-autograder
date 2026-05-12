@@ -2,7 +2,9 @@
 
 ## Goal
 
-Build a self-hostable CMSX autograding system where instructors can create assignment-specific autograders using simple Python grading scripts, while the platform handles CMSX webhook ingestion, job execution, reproducible runner environments, result storage, logs, job status, and future web UI integration.
+This document is the living plan for a self-hostable CMSX autograding system where instructors can create assignment-specific autograders using simple Python grading scripts, while the platform handles CMSX webhook ingestion, job execution, reproducible runner environments, result storage, logs, job status, and future web UI integration. It is intended primarily as context for future contributors and fresh AI agents.
+
+This plan is not completely strict. Prefer the choices here by default, but if implementation work reveals a clearly better approach, take the better approach and update this document to match reality.
 
 The first practical execution backend should use a long-running worker container with access to a Docker runtime. The project should still be designed around an executor interface so rootless Docker, Podman, host executor daemons, remote executors, and Firecracker or other microVM backends can be added later without changing grader scripts or assignment semantics.
 
