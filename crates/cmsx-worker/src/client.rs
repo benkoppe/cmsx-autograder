@@ -71,7 +71,6 @@ impl std::error::Error for ClientError {}
 #[derive(Debug, Clone, Deserialize)]
 pub struct ArtifactUploadErrorBody {
     pub code: Option<String>,
-    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,8 +78,8 @@ pub enum ArtifactUploadOutcome {
     Uploaded,
     JobNotActive,
     CancellationRequested,
-    NonRetryableFailure { code: Option<String>, body: String },
-    RetryableFailure { code: Option<String>, body: String },
+    NonRetryableFailure { body: String },
+    RetryableFailure { body: String },
 }
 
 pub struct ArtifactUpload<'a> {
@@ -369,16 +368,14 @@ async fn artifact_upload_outcome(
         (StatusCode::CONFLICT, Some("artifact_duplicate" | "artifact_conflict"))
         | (StatusCode::BAD_REQUEST, Some("artifact_invalid_metadata" | "artifact_hash_mismatch"))
         | (StatusCode::PAYLOAD_TOO_LARGE, Some("artifact_too_large"))
-        | (StatusCode::UNAUTHORIZED, _) => {
-            Ok(ArtifactUploadOutcome::NonRetryableFailure { code, body })
-        }
+        | (StatusCode::UNAUTHORIZED, _) => Ok(ArtifactUploadOutcome::NonRetryableFailure { body }),
         (status, Some("artifact_upload_failed")) if status.is_server_error() => {
-            Ok(ArtifactUploadOutcome::RetryableFailure { code, body })
+            Ok(ArtifactUploadOutcome::RetryableFailure { body })
         }
         (status, _) if status.is_server_error() => {
-            Ok(ArtifactUploadOutcome::RetryableFailure { code, body })
+            Ok(ArtifactUploadOutcome::RetryableFailure { body })
         }
-        _ => Ok(ArtifactUploadOutcome::NonRetryableFailure { code, body }),
+        _ => Ok(ArtifactUploadOutcome::NonRetryableFailure { body }),
     }
 }
 
