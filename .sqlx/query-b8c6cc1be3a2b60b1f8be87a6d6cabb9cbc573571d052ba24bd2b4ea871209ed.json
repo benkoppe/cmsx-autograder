@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT relative_path\n        FROM artifacts\n        WHERE job_id = $1\n          AND attempt = $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "relative_path",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b8c6cc1be3a2b60b1f8be87a6d6cabb9cbc573571d052ba24bd2b4ea871209ed"
+}
