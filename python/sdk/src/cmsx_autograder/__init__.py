@@ -82,7 +82,7 @@ class ArtifactRef:
     path: str
     label: str | None = None
 
-    def __post__init__(self) -> None:
+    def __post_init__(self) -> None:
         _validate_artifact_relative_path(self.path)
         if self.label is not None:
             _validate_artifact_label(self.label)
@@ -174,7 +174,7 @@ class Result:
         status = self.status if self.status is not None else self._derived_status(score)
 
         return {
-            "schema_version": "1",
+            "schema_version": "2",
             "status": status.value,
             "score": score,
             "max_score": self.max_score,

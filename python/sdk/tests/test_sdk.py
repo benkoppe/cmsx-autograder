@@ -7,7 +7,14 @@ from typing import cast
 
 import pytest
 
-from cmsx_autograder import CheckResult, JsonObject, Result, Status, Submission
+from cmsx_autograder import (
+    ArtifactRef,
+    CheckResult,
+    JsonObject,
+    Result,
+    Status,
+    Submission,
+)
 
 
 def read_result_json(output_dir: Path) -> JsonObject:
@@ -360,3 +367,175 @@ def test_derived_status_errors_when_any_check_error() -> None:
     )
 
     assert result.to_json()["status"] == "error"
+
+
+# --- artifact path validation ---
+
+
+def test_artifact_path_creates_parent_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_dir = tmp_path / "output"
+    monkeypatch.setenv("CMSX_OUTPUT_DIR", str(output_dir))
+
+    submission = Submission()
+    path = submission.artifact_path("reports/summary.txt")
+
+    assert path == output_dir / "artifacts" / "reports" / "summary.txt"
+    assert path.parent.is_dir()
+
+
+def test_artifact_path_simple_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_dir = tmp_path / "output"
+    monkeypatch.setenv("CMSX_OUTPUT_DIR", str(output_dir))
+
+    submission = Submission()
+    path = submission.artifact_path("report.txt")
+
+    assert path == output_dir / "artifacts" / "report.txt"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "/absolute.txt",
+        ".",
+        "..",
+        "a/./b",
+        "a/../b",
+        "a//b",
+        "a\\b",
+        "bad\nname",
+        "bad\x7fname",
+        "bad\x00name",
+        "bad\x01name",
+    ],
+)
+def test_artifact_path_rejects_invalid_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("CMSX_OUTPUT_DIR", str(tmp_path / "output"))
+    submission = Submission()
+
+    with pytest.raises(ValueError):
+        submission.artifact_path(value)
+
+
+@pytest.mark.parametrize("value", ["...", "....", ".....", "a/.../b"])
+def test_artifact_path_allows_longer_dot_only_components(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("CMSX_OUTPUT_DIR", str(tmp_path / "output"))
+    submission = Submission()
+
+    path = submission.artifact_path(value)
+
+    assert str(path).startswith(str(tmp_path / "output" / "artifacts"))
+
+
+def test_artifact_path_rejects_too_long_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CMSX_OUTPUT_DIR", str(tmp_path / "output"))
+    submission = Submission()
+
+    with pytest.raises(ValueError, match="too long"):
+        submission.artifact_path("a" * 1025)
+
+
+# --- Result.artifact ---
+
+
+def test_result_artifact_serializes_schema_v2() -> None:
+    result = Result(max_score=1)
+    result.check("ok", True, points=1)
+    result.artifact("reports/summary.txt", label="Summary")
+
+    encoded = result.to_json()
+
+    assert encoded["schema_version"] == "2"
+    assert encoded["artifacts"] == [
+        {"path": "reports/summary.txt", "label": "Summary"}
+    ]
+
+
+def test_result_artifact_without_label() -> None:
+    result = Result(max_score=1)
+    result.check("ok", True, points=1)
+    result.artifact("report.txt")
+
+    encoded = result.to_json()
+
+    assert encoded["artifacts"] == [{"path": "report.txt", "label": None}]
+
+
+def test_result_artifact_multiple() -> None:
+    result = Result(max_score=1)
+    result.check("ok", True, points=1)
+    result.artifact("a.txt")
+    result.artifact("b/c.txt", label="B-C")
+
+    encoded = result.to_json()
+
+    assert len(encoded["artifacts"]) == 2
+    assert encoded["artifacts"][0]["path"] == "a.txt"
+    assert encoded["artifacts"][1]["path"] == "b/c.txt"
+    assert encoded["artifacts"][1]["label"] == "B-C"
+
+
+def test_result_artifact_rejects_invalid_path() -> None:
+    result = Result(max_score=1)
+
+    with pytest.raises(ValueError):
+        result.artifact("../escape.txt")
+
+    with pytest.raises(ValueError):
+        result.artifact(".")
+
+    with pytest.raises(ValueError):
+        result.artifact("")
+
+
+def test_result_artifact_rejects_invalid_label() -> None:
+    result = Result(max_score=1)
+
+    with pytest.raises(ValueError, match="control"):
+        result.artifact("report.txt", label="bad\nlabel")
+
+    with pytest.raises(ValueError, match="too long"):
+        result.artifact("report.txt", label="a" * 257)
+
+
+def test_result_no_artifacts_serializes_empty_list() -> None:
+    result = Result(max_score=1)
+    result.check("ok", True, points=1)
+
+    encoded = result.to_json()
+
+    assert encoded["artifacts"] == []
+    assert encoded["schema_version"] == "2"
+
+
+# --- ArtifactRef dataclass validation ---
+
+
+def test_artifact_ref_validates_on_construction() -> None:
+    ref = ArtifactRef(path="report.txt")
+    assert ref.path == "report.txt"
+    assert ref.label is None
+
+
+def test_artifact_ref_rejects_invalid_path() -> None:
+    with pytest.raises(ValueError):
+        ArtifactRef(path="..")
+
+    with pytest.raises(ValueError):
+        ArtifactRef(path="")
+
+
+def test_artifact_ref_rejects_invalid_label() -> None:
+    with pytest.raises(ValueError):
+        ArtifactRef(path="report.txt", label="bad\x01label")

@@ -357,25 +357,36 @@ async fn artifact_upload_outcome(
 
     let status = response.status();
     let body = read_bounded_error_body(response).await;
-    let parsed = serde_json::from_str::<ArtifactUploadErrorBody>(&body).ok();
+
+    Ok(classify_artifact_upload_error(status, &body))
+}
+
+fn classify_artifact_upload_error(status: StatusCode, body: &str) -> ArtifactUploadOutcome {
+    let parsed = serde_json::from_str::<ArtifactUploadErrorBody>(body).ok();
     let code = parsed.and_then(|body| body.code);
 
     match (status, code.as_deref()) {
-        (StatusCode::NOT_FOUND, Some("job_not_active")) => Ok(ArtifactUploadOutcome::JobNotActive),
+        (StatusCode::NOT_FOUND, Some("job_not_active")) => ArtifactUploadOutcome::JobNotActive,
         (StatusCode::CONFLICT, Some("job_cancellation_requested")) => {
-            Ok(ArtifactUploadOutcome::CancellationRequested)
+            ArtifactUploadOutcome::CancellationRequested
         }
         (StatusCode::CONFLICT, Some("artifact_duplicate" | "artifact_conflict"))
         | (StatusCode::BAD_REQUEST, Some("artifact_invalid_metadata" | "artifact_hash_mismatch"))
         | (StatusCode::PAYLOAD_TOO_LARGE, Some("artifact_too_large"))
-        | (StatusCode::UNAUTHORIZED, _) => Ok(ArtifactUploadOutcome::NonRetryableFailure { body }),
+        | (StatusCode::UNAUTHORIZED, _) => ArtifactUploadOutcome::NonRetryableFailure {
+            body: body.to_string(),
+        },
         (status, Some("artifact_upload_failed")) if status.is_server_error() => {
-            Ok(ArtifactUploadOutcome::RetryableFailure { body })
+            ArtifactUploadOutcome::RetryableFailure {
+                body: body.to_string(),
+            }
         }
-        (status, _) if status.is_server_error() => {
-            Ok(ArtifactUploadOutcome::RetryableFailure { body })
-        }
-        _ => Ok(ArtifactUploadOutcome::NonRetryableFailure { body }),
+        (status, _) if status.is_server_error() => ArtifactUploadOutcome::RetryableFailure {
+            body: body.to_string(),
+        },
+        _ => ArtifactUploadOutcome::NonRetryableFailure {
+            body: body.to_string(),
+        },
     }
 }
 
@@ -393,5 +404,144 @@ mod tests {
         assert_eq!(error.status(), Some(StatusCode::NOT_FOUND));
         assert!(error.is_status(StatusCode::NOT_FOUND));
         assert_eq!(error.bounded_body(), Some("missing"));
+    }
+
+    // --- artifact upload outcome classification ---
+
+    fn coded_body(code: &str) -> String {
+        serde_json::json!({"error": "test", "code": code}).to_string()
+    }
+
+    #[test]
+    fn artifact_outcome_job_not_active() {
+        let body = coded_body("job_not_active");
+        let outcome = classify_artifact_upload_error(StatusCode::NOT_FOUND, &body);
+
+        assert!(matches!(outcome, ArtifactUploadOutcome::JobNotActive));
+    }
+
+    #[test]
+    fn artifact_outcome_cancellation_requested() {
+        let body = coded_body("job_cancellation_requested");
+        let outcome = classify_artifact_upload_error(StatusCode::CONFLICT, &body);
+
+        assert!(matches!(
+            outcome,
+            ArtifactUploadOutcome::CancellationRequested
+        ));
+    }
+
+    #[test]
+    fn artifact_outcome_duplicate_is_non_retryable() {
+        let body = coded_body("artifact_duplicate");
+        let outcome = classify_artifact_upload_error(StatusCode::CONFLICT, &body);
+
+        assert!(matches!(
+            outcome,
+            ArtifactUploadOutcome::NonRetryableFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn artifact_outcome_conflict_is_non_retryable() {
+        let body = coded_body("artifact_conflict");
+        let outcome = classify_artifact_upload_error(StatusCode::CONFLICT, &body);
+
+        assert!(matches!(
+            outcome,
+            ArtifactUploadOutcome::NonRetryableFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn artifact_outcome_invalid_metadata_is_non_retryable() {
+        let body = coded_body("artifact_invalid_metadata");
+        let outcome = classify_artifact_upload_error(StatusCode::BAD_REQUEST, &body);
+
+        assert!(matches!(
+            outcome,
+            ArtifactUploadOutcome::NonRetryableFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn artifact_outcome_hash_mismatch_is_non_retryable() {
+        let body = coded_body("artifact_hash_mismatch");
+        let outcome = classify_artifact_upload_error(StatusCode::BAD_REQUEST, &body);
+
+        assert!(matches!(
+            outcome,
+            ArtifactUploadOutcome::NonRetryableFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn artifact_outcome_too_large_is_non_retryable() {
+        let body = coded_body("artifact_too_large");
+        let outcome =
+            classify_artifact_upload_error(StatusCode::PAYLOAD_TOO_LARGE, &body);
+
+        assert!(matches!(
+            outcome,
+            ArtifactUploadOutcome::NonRetryableFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn artifact_outcome_unauthorized_is_non_retryable() {
+        let outcome =
+            classify_artifact_upload_error(StatusCode::UNAUTHORIZED, "unauthorized");
+
+        assert!(matches!(
+            outcome,
+            ArtifactUploadOutcome::NonRetryableFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn artifact_outcome_server_error_with_upload_failed_code_is_retryable() {
+        let body = coded_body("artifact_upload_failed");
+        let outcome =
+            classify_artifact_upload_error(StatusCode::INTERNAL_SERVER_ERROR, &body);
+
+        assert!(matches!(
+            outcome,
+            ArtifactUploadOutcome::RetryableFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn artifact_outcome_generic_server_error_is_retryable() {
+        let outcome = classify_artifact_upload_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "not json",
+        );
+
+        assert!(matches!(
+            outcome,
+            ArtifactUploadOutcome::RetryableFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn artifact_outcome_502_is_retryable() {
+        let outcome =
+            classify_artifact_upload_error(StatusCode::BAD_GATEWAY, "gateway error");
+
+        assert!(matches!(
+            outcome,
+            ArtifactUploadOutcome::RetryableFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn artifact_outcome_unknown_4xx_is_non_retryable() {
+        let outcome =
+            classify_artifact_upload_error(StatusCode::FORBIDDEN, "forbidden");
+
+        assert!(matches!(
+            outcome,
+            ArtifactUploadOutcome::NonRetryableFailure { .. }
+        ));
     }
 }

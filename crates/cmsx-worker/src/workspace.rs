@@ -1348,4 +1348,325 @@ mod tests {
 
         assert!(!workspace.work_dir.join("stale").exists());
     }
+
+    // --- artifact discovery tests ---
+
+    fn test_workspace_at(root: &std::path::Path) -> JobWorkspace {
+        let input_dir = root.join(job_contract::INPUT_DIR);
+        let files_dir = input_dir.join(job_contract::FILES_DIR);
+        let grader_dir = root.join(job_contract::GRADER_DIR);
+        let work_dir = root.join(job_contract::WORK_DIR);
+        let output_dir = root.join(job_contract::OUTPUT_DIR);
+        let artifacts_dir = output_dir.join(job_contract::ARTIFACTS_DIR);
+        let result_path = output_dir.join(job_contract::RESULT_JSON);
+
+        fs::create_dir_all(&files_dir).unwrap();
+        fs::create_dir_all(&grader_dir).unwrap();
+        fs::create_dir_all(&work_dir).unwrap();
+        fs::create_dir_all(&artifacts_dir).unwrap();
+
+        JobWorkspace {
+            root: root.to_path_buf(),
+            input_dir,
+            files_dir,
+            grader_dir,
+            work_dir,
+            output_dir,
+            artifacts_dir,
+            result_path,
+        }
+    }
+
+    #[tokio::test]
+    async fn discover_artifacts_returns_empty_when_dir_missing() {
+        let temp = TempDir::new().unwrap();
+        let workspace = test_workspace_at(temp.path());
+        tokio_fs::remove_dir_all(&workspace.artifacts_dir)
+            .await
+            .unwrap();
+
+        let artifacts = discover_artifacts(&workspace).await.unwrap();
+
+        assert!(artifacts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn discover_artifacts_returns_empty_for_empty_dir() {
+        let temp = TempDir::new().unwrap();
+        let workspace = test_workspace_at(temp.path());
+
+        let artifacts = discover_artifacts(&workspace).await.unwrap();
+
+        assert!(artifacts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn discover_artifacts_finds_regular_files() {
+        let temp = TempDir::new().unwrap();
+        let workspace = test_workspace_at(temp.path());
+
+        tokio_fs::write(workspace.artifacts_dir.join("report.txt"), b"hello")
+            .await
+            .unwrap();
+
+        let artifacts = discover_artifacts(&workspace).await.unwrap();
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].relative_path, "report.txt");
+        assert_eq!(artifacts[0].size_bytes, 5);
+    }
+
+    #[tokio::test]
+    async fn discover_artifacts_finds_nested_files_sorted_by_path() {
+        let temp = TempDir::new().unwrap();
+        let workspace = test_workspace_at(temp.path());
+
+        tokio_fs::create_dir_all(workspace.artifacts_dir.join("b"))
+            .await
+            .unwrap();
+        tokio_fs::create_dir_all(workspace.artifacts_dir.join("a"))
+            .await
+            .unwrap();
+        tokio_fs::write(workspace.artifacts_dir.join("b/two.txt"), b"two")
+            .await
+            .unwrap();
+        tokio_fs::write(workspace.artifacts_dir.join("a/one.txt"), b"one")
+            .await
+            .unwrap();
+        tokio_fs::write(workspace.artifacts_dir.join("root.txt"), b"root")
+            .await
+            .unwrap();
+
+        let artifacts = discover_artifacts(&workspace).await.unwrap();
+        let paths: Vec<_> = artifacts.iter().map(|a| a.relative_path.as_str()).collect();
+
+        assert_eq!(paths, vec!["a/one.txt", "b/two.txt", "root.txt"]);
+    }
+
+    #[tokio::test]
+    async fn discover_artifacts_computes_correct_sha256() {
+        let temp = TempDir::new().unwrap();
+        let workspace = test_workspace_at(temp.path());
+
+        tokio_fs::write(workspace.artifacts_dir.join("file.txt"), b"hello")
+            .await
+            .unwrap();
+
+        let artifacts = discover_artifacts(&workspace).await.unwrap();
+        let expected_sha256 = hex::encode(Sha256::digest(b"hello"));
+
+        assert_eq!(artifacts[0].sha256, expected_sha256);
+    }
+
+    #[tokio::test]
+    async fn discover_artifacts_enforces_max_artifact_count() {
+        let temp = TempDir::new().unwrap();
+        let workspace = test_workspace_at(temp.path());
+
+        for index in 0..=cmsx_core::protocol::ARTIFACT_MAX_COUNT {
+            tokio_fs::write(
+                workspace.artifacts_dir.join(format!("{index}.txt")),
+                b"x",
+            )
+            .await
+            .unwrap();
+        }
+
+        let error = discover_artifacts(&workspace).await.unwrap_err();
+
+        assert!(matches!(error, ArtifactDiscoveryError::TooManyArtifacts));
+    }
+
+    #[tokio::test]
+    async fn discover_artifacts_enforces_per_file_size_limit() {
+        let temp = TempDir::new().unwrap();
+        let workspace = test_workspace_at(temp.path());
+
+        let file = tokio_fs::File::create(workspace.artifacts_dir.join("big.bin"))
+            .await
+            .unwrap();
+        file.set_len(cmsx_core::protocol::ARTIFACT_MAX_BYTES + 1)
+            .await
+            .unwrap();
+
+        let error = discover_artifacts(&workspace).await.unwrap_err();
+
+        assert!(matches!(error, ArtifactDiscoveryError::ArtifactTooLarge(_)));
+    }
+
+    #[tokio::test]
+    async fn discover_artifacts_enforces_traversal_entry_limit() {
+        let temp = TempDir::new().unwrap();
+        let workspace = test_workspace_at(temp.path());
+
+        for index in 0..=ARTIFACT_MAX_DISCOVERY_ENTRIES {
+            tokio_fs::create_dir(workspace.artifacts_dir.join(format!("dir{index}")))
+                .await
+                .unwrap();
+        }
+
+        let error = discover_artifacts(&workspace).await.unwrap_err();
+
+        assert!(matches!(error, ArtifactDiscoveryError::TooManyEntries));
+    }
+
+    #[tokio::test]
+    async fn discover_artifacts_enforces_max_depth() {
+        let temp = TempDir::new().unwrap();
+        let workspace = test_workspace_at(temp.path());
+
+        let mut current = workspace.artifacts_dir.clone();
+        for depth in 0..=ARTIFACT_MAX_DISCOVERY_DEPTH + 1 {
+            current = current.join(format!("d{depth}"));
+            tokio_fs::create_dir_all(&current).await.unwrap();
+        }
+        tokio_fs::write(current.join("deep.txt"), b"deep")
+            .await
+            .unwrap();
+
+        let error = discover_artifacts(&workspace).await.unwrap_err();
+
+        assert!(matches!(error, ArtifactDiscoveryError::TooDeep));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn discover_artifacts_rejects_symlink_file() {
+        let temp = TempDir::new().unwrap();
+        let workspace = test_workspace_at(temp.path());
+
+        tokio_fs::write(workspace.artifacts_dir.join("target.txt"), b"x")
+            .await
+            .unwrap();
+        std::os::unix::fs::symlink(
+            workspace.artifacts_dir.join("target.txt"),
+            workspace.artifacts_dir.join("link.txt"),
+        )
+        .unwrap();
+
+        let error = discover_artifacts(&workspace).await.unwrap_err();
+
+        assert!(matches!(error, ArtifactDiscoveryError::Symlink(_)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn discover_artifacts_rejects_symlink_directory() {
+        let temp = TempDir::new().unwrap();
+        let workspace = test_workspace_at(temp.path());
+
+        tokio_fs::create_dir_all(workspace.artifacts_dir.join("real"))
+            .await
+            .unwrap();
+        std::os::unix::fs::symlink(
+            workspace.artifacts_dir.join("real"),
+            workspace.artifacts_dir.join("linkdir"),
+        )
+        .unwrap();
+
+        let error = discover_artifacts(&workspace).await.unwrap_err();
+
+        assert!(matches!(error, ArtifactDiscoveryError::Symlink(_)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hash_artifact_rejects_symlink_replacement() {
+        let temp = TempDir::new().unwrap();
+        let workspace = test_workspace_at(temp.path());
+        let artifact = workspace.artifacts_dir.join("report.txt");
+        let outside = temp.path().join("outside.txt");
+
+        tokio_fs::write(&artifact, b"original").await.unwrap();
+        tokio_fs::write(&outside, b"outside").await.unwrap();
+
+        // discover first to confirm the original file is valid
+        let artifacts = discover_artifacts(&workspace).await.unwrap();
+        assert_eq!(artifacts.len(), 1);
+
+        // replace with symlink
+        tokio_fs::remove_file(&artifact).await.unwrap();
+        std::os::unix::fs::symlink(&outside, &artifact).unwrap();
+
+        let error = hash_artifact_file_with_revalidation(
+            &workspace.artifacts_dir,
+            &artifact,
+            "report.txt",
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, ArtifactDiscoveryError::Symlink(_)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hash_artifact_rejects_symlink_parent_replacement() {
+        let temp = TempDir::new().unwrap();
+        let workspace = test_workspace_at(temp.path());
+
+        let subdir = workspace.artifacts_dir.join("sub");
+        tokio_fs::create_dir_all(&subdir).await.unwrap();
+        tokio_fs::write(subdir.join("file.txt"), b"data").await.unwrap();
+
+        // discover first
+        let artifacts = discover_artifacts(&workspace).await.unwrap();
+        assert_eq!(artifacts.len(), 1);
+
+        // replace parent dir with symlink to outside
+        let outside_dir = temp.path().join("outside_dir");
+        tokio_fs::create_dir_all(&outside_dir).await.unwrap();
+        tokio_fs::write(outside_dir.join("file.txt"), b"evil")
+            .await
+            .unwrap();
+
+        tokio_fs::remove_dir_all(&subdir).await.unwrap();
+        std::os::unix::fs::symlink(&outside_dir, &subdir).unwrap();
+
+        let error = hash_artifact_file_with_revalidation(
+            &workspace.artifacts_dir,
+            &subdir.join("file.txt"),
+            "sub/file.txt",
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, ArtifactDiscoveryError::Symlink(_)));
+    }
+
+    #[tokio::test]
+    async fn discover_artifacts_assigns_unique_ids() {
+        let temp = TempDir::new().unwrap();
+        let workspace = test_workspace_at(temp.path());
+
+        tokio_fs::write(workspace.artifacts_dir.join("a.txt"), b"a")
+            .await
+            .unwrap();
+        tokio_fs::write(workspace.artifacts_dir.join("b.txt"), b"b")
+            .await
+            .unwrap();
+
+        let artifacts = discover_artifacts(&workspace).await.unwrap();
+
+        assert_eq!(artifacts.len(), 2);
+        assert_ne!(artifacts[0].id, artifacts[1].id);
+    }
+
+    #[tokio::test]
+    async fn discover_artifacts_accepts_dot_only_names_longer_than_two() {
+        let temp = TempDir::new().unwrap();
+        let workspace = test_workspace_at(temp.path());
+
+        tokio_fs::create_dir_all(workspace.artifacts_dir.join("..."))
+            .await
+            .unwrap();
+        tokio_fs::write(workspace.artifacts_dir.join(".../file.txt"), b"ok")
+            .await
+            .unwrap();
+
+        let artifacts = discover_artifacts(&workspace).await.unwrap();
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].relative_path, ".../file.txt");
+    }
 }
