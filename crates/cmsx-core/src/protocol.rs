@@ -1,3 +1,7 @@
+use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
+use serde::{Deserialize, Serialize};
+use std::{fmt, str::FromStr};
+
 pub const TEXT_TRUNCATION_MARKER: &str = "\n...[truncated]";
 
 pub const JOB_EVENT_MESSAGE_MAX_BYTES: usize = 64 * 1024;
@@ -23,7 +27,15 @@ pub const ASSIGNMENT_NAME_MAX_BYTES: usize = 256;
 pub const WORKER_NAME_MAX_BYTES: usize = 128;
 pub const JOB_FAILURE_REASON_MAX_BYTES: usize = 128;
 pub const GRADING_RESULT_MAX_TESTS: usize = 512;
-pub const GRADING_RESULT_MAX_ARTIFACTS: usize = 128;
+pub const GRADING_RESULT_MAX_ARTIFACTS: usize = ARTIFACT_MAX_COUNT;
+
+pub const ARTIFACT_MAX_COUNT: usize = 128;
+pub const ARTIFACT_MAX_BYTES: u64 = 10 * 1024 * 1024;
+pub const ARTIFACT_TOTAL_MAX_BYTES: u64 = 50 * 1024 * 1024;
+pub const ARTIFACT_RELATIVE_PATH_MAX_BYTES: usize = 1024;
+pub const ARTIFACT_RELATIVE_PATH_MAX_ENCODED_BYTES: usize = 3 * ARTIFACT_RELATIVE_PATH_MAX_BYTES;
+pub const ARTIFACT_NAME_MAX_BYTES: usize = 255;
+pub const ARTIFACT_LABEL_MAX_BYTES: usize = 256;
 
 pub mod failure_reason {
     pub const INPUT_DOWNLOAD_FAILED: &str = "input_download_failed";
@@ -32,6 +44,8 @@ pub mod failure_reason {
     pub const EXECUTOR_ERROR: &str = "executor_error";
     pub const RESULT_MISSING: &str = "result_missing";
     pub const RESULT_INVALID: &str = "result_invalid";
+    pub const ARTIFACT_INVALID: &str = "artifact_invalid";
+    pub const ARTIFACT_UPLOAD_FAILED: &str = "artifact_upload_failed";
     pub const CANCELLED_BEFORE_START: &str = "cancelled_before_start";
     pub const TIMEOUT: &str = "timeout";
     pub const LEASE_LOST: &str = "lease_lost";
@@ -47,6 +61,10 @@ pub mod job_event_type {
     pub const EXECUTOR_STARTED: &str = "executor.started";
     pub const EXECUTOR_CONTAINER_CREATED: &str = "executor.container.created";
     pub const EXECUTOR_CONTAINER_STARTED: &str = "executor.container.started";
+    pub const ARTIFACT_DISCOVERED: &str = "artifact.discovered";
+    pub const ARTIFACT_UPLOADED: &str = "artifact.uploaded";
+    pub const ARTIFACT_REJECTED: &str = "artifact.rejected";
+    pub const ARTIFACT_UPLOAD_FAILED: &str = "artifact.upload_failed";
     pub const RESULT_READ: &str = "result.read";
     pub const JOB_TIMEOUT: &str = "job.timeout";
     pub const JOB_CANCELLED: &str = "job.cancelled";
@@ -150,6 +168,250 @@ fn truncate_to_char_boundary(value: &str, max_bytes: usize) -> &str {
     }
 
     &value[..end]
+}
+
+const ARTIFACT_PATH_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'!')
+    .add(b'"')
+    .add(b'#')
+    .add(b'$')
+    .add(b'%')
+    .add(b'&')
+    .add(b'\'')
+    .add(b'(')
+    .add(b')')
+    .add(b'*')
+    .add(b'+')
+    .add(b',')
+    .add(b':')
+    .add(b';')
+    .add(b'<')
+    .add(b'=')
+    .add(b'>')
+    .add(b'?')
+    .add(b'@')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactVisibility {
+    Student,
+    Staff,
+    Internal,
+}
+
+impl ArtifactVisibility {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Student => "student",
+            Self::Staff => "staff",
+            Self::Internal => "internal",
+        }
+    }
+
+    pub fn is_valid(value: &str) -> bool {
+        matches!(value, "student" | "staff" | "internal")
+    }
+}
+
+impl FromStr for ArtifactVisibility {
+    type Err = ArtifactValidationError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "student" => Ok(Self::Student),
+            "staff" => Ok(Self::Staff),
+            "internal" => Ok(Self::Internal),
+            _ => Err(ArtifactValidationError::InvalidVisibility),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtifactValidationError {
+    EmptyPath,
+    AbsolutePath,
+    PathTooLong,
+    EmptyComponent,
+    DotComponent,
+    DotDotComponent,
+    Backslash,
+    ControlCharacter,
+    NameTooLong,
+    LabelTooLong,
+    InvalidLabel,
+    InvalidSha256,
+    InvalidVisibility,
+    EncodedPathTooLong,
+    NonAsciiEncodedPath,
+    InvalidPercentEncoding,
+    InvalidUtf8,
+}
+
+impl fmt::Display for ArtifactValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::EmptyPath => "artifact path must not be empty",
+            Self::AbsolutePath => "artifact path must be relative",
+            Self::PathTooLong => "artifact path is too long",
+            Self::EmptyComponent => "artifact path contains an empty component",
+            Self::DotComponent => "artifact path must not contain '.' components",
+            Self::DotDotComponent => "artifact path must not contain '..' components",
+            Self::Backslash => "artifact path must not contain backslashes",
+            Self::ControlCharacter => "artifact path contains a control character",
+            Self::NameTooLong => "artifact filename is too long",
+            Self::LabelTooLong => "artifact label is too long",
+            Self::InvalidLabel => "artifact label contains an invalid character",
+            Self::InvalidSha256 => "artifact sha256 must be 64 lowercase hex characters",
+            Self::InvalidVisibility => "invalid artifact visibility",
+            Self::EncodedPathTooLong => "encoded artifact path is too long",
+            Self::NonAsciiEncodedPath => "encoded artifact path must be ASCII",
+            Self::InvalidPercentEncoding => "invalid percent encoding in artifact path",
+            Self::InvalidUtf8 => "artifact path must decode to UTF-8",
+        };
+        write!(f, "{message}")
+    }
+}
+
+impl std::error::Error for ArtifactValidationError {}
+
+pub fn validate_artifact_relative_path(value: &str) -> Result<(), ArtifactValidationError> {
+    if value.is_empty() {
+        return Err(ArtifactValidationError::EmptyPath);
+    }
+    if value.len() > ARTIFACT_RELATIVE_PATH_MAX_BYTES {
+        return Err(ArtifactValidationError::PathTooLong);
+    }
+    if value.starts_with('/') {
+        return Err(ArtifactValidationError::AbsolutePath);
+    }
+    if value.contains('\\') {
+        return Err(ArtifactValidationError::Backslash);
+    }
+    if value
+        .chars()
+        .any(|ch| ch == '\0' || ch.is_ascii_control() || ch == '\u{7f}')
+    {
+        return Err(ArtifactValidationError::ControlCharacter);
+    }
+
+    let mut last_component = None;
+
+    for component in value.split('/') {
+        if component.is_empty() {
+            return Err(ArtifactValidationError::EmptyComponent);
+        }
+        if component == "." {
+            return Err(ArtifactValidationError::DotComponent);
+        }
+        if component == ".." {
+            return Err(ArtifactValidationError::DotDotComponent);
+        }
+
+        last_component = Some(component);
+    }
+
+    let Some(name) = last_component else {
+        return Err(ArtifactValidationError::EmptyPath);
+    };
+
+    if name.len() > ARTIFACT_NAME_MAX_BYTES {
+        return Err(ArtifactValidationError::NameTooLong);
+    }
+
+    Ok(())
+}
+
+pub fn artifact_name_from_relative_path(value: &str) -> Result<&str, ArtifactValidationError> {
+    validate_artifact_relative_path(value)?;
+    Ok(value
+        .rsplit('/')
+        .next()
+        .expect("validated non-empty path should have final component"))
+}
+
+pub fn validate_artifact_label(value: &str) -> Result<(), ArtifactValidationError> {
+    if value.as_bytes().len() > ARTIFACT_LABEL_MAX_BYTES {
+        return Err(ArtifactValidationError::LabelTooLong);
+    }
+
+    if value
+        .chars()
+        .any(|ch| ch == '\0' || ch.is_ascii_control() || ch == '\u{7f}')
+    {
+        return Err(ArtifactValidationError::InvalidLabel);
+    }
+
+    Ok(())
+}
+
+pub fn validate_artifact_sha256(value: &str) -> Result<(), ArtifactValidationError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(ArtifactValidationError::InvalidSha256);
+    }
+
+    Ok(())
+}
+
+pub fn encode_artifact_relative_path(value: &str) -> Result<String, ArtifactValidationError> {
+    validate_artifact_relative_path(value)?;
+    Ok(utf8_percent_encode(value, ARTIFACT_PATH_ENCODE_SET).to_string())
+}
+
+pub fn decode_artifact_relative_path(value: &str) -> Result<String, ArtifactValidationError> {
+    if value.len() > ARTIFACT_RELATIVE_PATH_MAX_ENCODED_BYTES {
+        return Err(ArtifactValidationError::EncodedPathTooLong);
+    }
+
+    if !value.is_ascii() {
+        return Err(ArtifactValidationError::NonAsciiEncodedPath);
+    }
+
+    validate_percent_escapes(value)?;
+
+    let decoded = percent_decode_str(value)
+        .decode_utf8()
+        .map_err(|_| ArtifactValidationError::InvalidUtf8)?
+        .into_owned();
+
+    validate_artifact_relative_path(&decoded)?;
+    Ok(decoded)
+}
+
+fn validate_percent_escapes(value: &str) -> Result<(), ArtifactValidationError> {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            index += 1;
+            continue;
+        }
+
+        if index + 2 >= bytes.len() {
+            return Err(ArtifactValidationError::InvalidPercentEncoding);
+        }
+
+        if !bytes[index + 1].is_ascii_hexdigit() || !bytes[index + 2].is_ascii_hexdigit() {
+            return Err(ArtifactValidationError::InvalidPercentEncoding);
+        }
+
+        index += 3;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

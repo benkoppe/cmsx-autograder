@@ -587,6 +587,250 @@ pub async fn read_bounded_result_json(
     serde_json::from_slice(&bytes).map_err(ResultReadError::InvalidJson)
 }
 
+#[derive(Debug, Clone)]
+pub struct DiscoveredArtifact {
+    pub id: Uuid,
+    pub relative_path: String,
+    pub path: PathBuf,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Error)]
+pub enum ArtifactDiscoveryError {
+    #[error("artifacts directory traversal failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("artifact path is invalid: {0}")]
+    InvalidPath(String),
+    #[error("artifact path is not valid utf-8: {0}")]
+    NonUtf8Path(String),
+    #[error("artifact is a symlink: {0}")]
+    Symlink(String),
+    #[error("artifact is not a regular file: {0}")]
+    NotRegularFile(String),
+    #[error("too many artifact directory entries")]
+    TooManyEntries,
+    #[error("artifact directory nesting is too deep")]
+    TooDeep,
+    #[error("too many artifacts")]
+    TooManyArtifacts,
+    #[error("artifact is too large: {0}")]
+    ArtifactTooLarge(String),
+    #[error("total artifact size is too large")]
+    TotalTooLarge,
+    #[error("artifact changed before upload: {0}")]
+    Changed(String),
+}
+
+pub const ARTIFACT_MAX_DISCOVERY_ENTRIES: usize = 4096;
+pub const ARTIFACT_MAX_DISCOVERY_DEPTH: usize = 16;
+
+pub async fn discover_artifacts(
+    workspace: &JobWorkspace,
+) -> Result<Vec<DiscoveredArtifact>, ArtifactDiscoveryError> {
+    if !workspace.artifacts_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries_seen = 0_usize;
+    let mut artifacts = Vec::new();
+
+    discover_artifacts_inner(
+        &workspace.artifacts_dir,
+        &workspace.artifacts_dir,
+        0,
+        &mut entries_seen,
+        &mut artifacts,
+    )
+    .await?;
+
+    artifacts.sort_by(|left, right| {
+        left.relative_path
+            .cmp(&right.relative_path)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    let mut total = 0_u64;
+
+    for artifact in &artifacts {
+        if artifact.size_bytes > cmsx_core::protocol::ARTIFACT_MAX_BYTES {
+            return Err(ArtifactDiscoveryError::ArtifactTooLarge(
+                artifact.relative_path.clone(),
+            ));
+        }
+
+        total = total.saturating_add(artifact.size_bytes);
+
+        if total > cmsx_core::protocol::ARTIFACT_TOTAL_MAX_BYTES {
+            return Err(ArtifactDiscoveryError::TotalTooLarge);
+        }
+    }
+
+    if artifacts.len() > cmsx_core::protocol::ARTIFACT_MAX_COUNT {
+        return Err(ArtifactDiscoveryError::TooManyArtifacts);
+    }
+
+    Ok(artifacts)
+}
+
+async fn discover_artifacts_inner(
+    artifacts_root: &Path,
+    dir: &Path,
+    depth: usize,
+    entries_seen: &mut usize,
+    artifacts: &mut Vec<DiscoveredArtifact>,
+) -> Result<(), ArtifactDiscoveryError> {
+    if depth > ARTIFACT_MAX_DISCOVERY_DEPTH {
+        return Err(ArtifactDiscoveryError::TooDeep);
+    }
+
+    let mut read_dir = tokio_fs::read_dir(dir).await?;
+
+    while let Some(entry) = read_dir.next_entry().await? {
+        *entries_seen += 1;
+
+        if *entries_seen > ARTIFACT_MAX_DISCOVERY_ENTRIES {
+            return Err(ArtifactDiscoveryError::TooManyEntries);
+        }
+
+        let path = entry.path();
+        let metadata = tokio_fs::symlink_metadata(&path).await?;
+
+        if metadata.file_type().is_symlink() {
+            return Err(ArtifactDiscoveryError::Symlink(path.display().to_string()));
+        }
+
+        if metadata.is_dir() {
+            Box::pin(discover_artifacts_inner(
+                artifacts_root,
+                &path,
+                depth + 1,
+                entries_seen,
+                artifacts,
+            ))
+            .await?;
+            continue;
+        }
+
+        if !metadata.is_file() {
+            return Err(ArtifactDiscoveryError::NotRegularFile(
+                path.display().to_string(),
+            ));
+        }
+
+        let relative_path = artifact_relative_path(artifacts_root, &path)?;
+        let (size_bytes, sha256) =
+            hash_artifact_file_with_revalidation(artifacts_root, &path, &relative_path).await?;
+
+        artifacts.push(DiscoveredArtifact {
+            id: Uuid::now_v7(),
+            relative_path,
+            path,
+            size_bytes,
+            sha256,
+        });
+    }
+
+    Ok(())
+}
+
+fn artifact_relative_path(
+    artifacts_root: &Path,
+    path: &Path,
+) -> Result<String, ArtifactDiscoveryError> {
+    let relative = path
+        .strip_prefix(artifacts_root)
+        .map_err(|_| ArtifactDiscoveryError::InvalidPath(path.display().to_string()))?;
+
+    let relative = relative
+        .to_str()
+        .ok_or_else(|| ArtifactDiscoveryError::NonUtf8Path(path.display().to_string()))?
+        .replace('\\', "/");
+
+    cmsx_core::protocol::validate_artifact_relative_path(&relative)
+        .map_err(|error| ArtifactDiscoveryError::InvalidPath(error.to_string()))?;
+
+    Ok(relative)
+}
+
+pub async fn hash_artifact_file_with_revalidation(
+    artifacts_root: &Path,
+    path: &Path,
+    relative_path: &str,
+) -> Result<(u64, String), ArtifactDiscoveryError> {
+    revalidate_artifact_components(artifacts_root, relative_path).await?;
+
+    let metadata = tokio_fs::symlink_metadata(path).await?;
+
+    if metadata.file_type().is_symlink() {
+        return Err(ArtifactDiscoveryError::Symlink(relative_path.to_string()));
+    }
+
+    if !metadata.is_file() {
+        return Err(ArtifactDiscoveryError::NotRegularFile(
+            relative_path.to_string(),
+        ));
+    }
+
+    let mut file = tokio_fs::File::open(path).await?;
+    let mut hasher = Sha256::new();
+    let mut size = 0_u64;
+    let mut buffer = [0_u8; 8192];
+
+    loop {
+        let read = file.read(&mut buffer).await?;
+
+        if read == 0 {
+            break;
+        }
+
+        size = size.saturating_add(read as u64);
+        hasher.update(&buffer[..read]);
+    }
+
+    let after = tokio_fs::symlink_metadata(path).await?;
+
+    if after.file_type().is_symlink() || !after.is_file() || after.len() != size {
+        return Err(ArtifactDiscoveryError::Changed(relative_path.to_string()));
+    }
+
+    Ok((size, hex::encode(hasher.finalize())))
+}
+
+async fn revalidate_artifact_components(
+    artifacts_root: &Path,
+    relative_path: &str,
+) -> Result<(), ArtifactDiscoveryError> {
+    cmsx_core::protocol::validate_artifact_relative_path(relative_path)
+        .map_err(|error| ArtifactDiscoveryError::InvalidPath(error.to_string()))?;
+
+    let mut current = artifacts_root.to_path_buf();
+    let mut components = relative_path.split('/').peekable();
+
+    while let Some(component) = components.next() {
+        current.push(component);
+        let metadata = tokio_fs::symlink_metadata(&current).await?;
+
+        if metadata.file_type().is_symlink() {
+            return Err(ArtifactDiscoveryError::Symlink(relative_path.to_string()));
+        }
+
+        if components.peek().is_some() {
+            if !metadata.is_dir() {
+                return Err(ArtifactDiscoveryError::InvalidPath(
+                    relative_path.to_string(),
+                ));
+            }
+        } else if !metadata.is_file() {
+            return Err(ArtifactDiscoveryError::NotRegularFile(
+                relative_path.to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

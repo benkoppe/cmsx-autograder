@@ -17,6 +17,10 @@ JsonValue: TypeAlias = (
 )
 JsonObject: TypeAlias = dict[str, JsonValue]
 
+ARTIFACT_RELATIVE_PATH_MAX_BYTES = 1024
+ARTIFACT_NAME_MAX_BYTES = 255
+ARTIFACT_LABEL_MAX_BYTES = 256
+
 
 class Status(StrEnum):
     PASSED = "passed"
@@ -74,11 +78,68 @@ class CheckResult:
 
 
 @dataclass
+class ArtifactRef:
+    path: str
+    label: str | None = None
+
+    def __post__init__(self) -> None:
+        _validate_artifact_relative_path(self.path)
+        if self.label is not None:
+            _validate_artifact_label(self.label)
+
+    def to_json(self) -> JsonObject:
+        return {
+            "path": self.path,
+            "label": self.label,
+        }
+
+
+def _validate_artifact_relative_path(value: str) -> None:
+    if not value:
+        raise ValueError("artifact path must not be empty")
+
+    encoded = value.encode("utf-8")
+
+    if len(encoded) > ARTIFACT_RELATIVE_PATH_MAX_BYTES:
+        raise ValueError("artifact path is too long")
+
+    if value.startswith("/"):
+        raise ValueError("artifact path must be relative")
+
+    if "\\" in value:
+        raise ValueError("artifact path must not contain backslashes")
+
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+        raise ValueError("artifact path must not contain control characters")
+
+    components = value.split("/")
+
+    for component in components:
+        if component == "":
+            raise ValueError("artifact path must not contain empty components")
+        if component == ".":
+            raise ValueError("artifact path must not contain '.' components")
+        if component == "..":
+            raise ValueError("artifact path must not contain '..' components")
+
+    if len(components[-1].encode("utf-8")) > ARTIFACT_NAME_MAX_BYTES:
+        raise ValueError("artifact filename is too long")
+
+
+def _validate_artifact_label(value: str) -> None:
+    if len(value.encode("utf-8")) > ARTIFACT_LABEL_MAX_BYTES:
+        raise ValueError("artifact label is too long")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+        raise ValueError("artifact label must not contain control characters")
+
+
+@dataclass
 class Result:
     max_score: float
     feedback: str | None = None
     tests: list[CheckResult] = field(default_factory=list)
     status: Status | None = None
+    artifacts: list[ArtifactRef] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         _validate_finite_nonnegative_score(self.max_score, "max_score")
@@ -98,6 +159,9 @@ class Result:
             )
         )
 
+    def artifact(self, path: str, label: str | None = None) -> None:
+        self.artifacts.append(ArtifactRef(path=path, label=label))
+
     def to_json(self) -> JsonObject:
         score = sum(test.score for test in self.tests)
         total_check_points = sum(test.max_score for test in self.tests)
@@ -116,7 +180,7 @@ class Result:
             "max_score": self.max_score,
             "feedback": self.feedback,
             "tests": [test.to_json() for test in self.tests],
-            "artifacts": [],
+            "artifacts": [artifact.to_json() for artifact in self.artifacts],
         }
 
     def _derived_status(self, score: float) -> Status:
@@ -235,6 +299,12 @@ class Submission:
             raise ValueError("metadata.json must contain a JSON object")
 
         return cast(JsonObject, metadata)
+
+    def artifact_path(self, path: str) -> Path:
+        _validate_artifact_relative_path(path)
+        target = self.artifacts_dir.joinpath(*path.split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        return target
 
 
 GradeFunction: TypeAlias = Callable[[Submission], object]

@@ -1,7 +1,9 @@
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{StatusCode, header},
+    response::Response,
     routing::{get, post},
 };
 use chrono::{DateTime, Duration, Utc};
@@ -28,6 +30,11 @@ pub fn router() -> Router<AppState> {
         .route("/jobs/{job_id}", get(get_job))
         .route("/jobs/{job_id}/events", get(get_job_events))
         .route("/jobs/{job_id}/cancel", post(cancel_job))
+        .route("/jobs/{job_id}/artifacts", get(list_job_artifacts))
+        .route(
+            "/jobs/{job_id}/artifacts/{artifact_id}",
+            get(download_job_artifact),
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,6 +94,20 @@ pub struct JobEventResponse {
     pub visibility: String,
     pub message: String,
     pub data: Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ArtifactResponse {
+    pub id: Uuid,
+    pub job_id: Uuid,
+    pub attempt: i32,
+    pub relative_path: String,
+    pub name: String,
+    pub content_type: Option<String>,
+    pub size_bytes: i64,
+    pub sha256: String,
+    pub visibility: String,
+    pub created_at: DateTime<Utc>,
 }
 
 pub async fn get_job(
@@ -330,6 +351,99 @@ pub async fn cancel_job(
 
     tx.commit().await.map_err(ApiError::internal)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn list_job_artifacts(
+    State(state): State<AppState>,
+    _admin: AdminAuth,
+    Path(job_id): Path<Uuid>,
+) -> Result<Json<Vec<ArtifactResponse>>, ApiError> {
+    ensure_job_exists(&state, job_id).await?;
+
+    let rows = sqlx::query!(
+        r#"
+        SELECT
+            artifacts.id,
+            artifacts.job_id,
+            artifacts.attempt,
+            artifacts.relative_path,
+            artifacts.name,
+            artifacts.content_type,
+            artifacts.size_bytes,
+            artifacts.sha256,
+            artifacts.visibility,
+            artifacts.created_at
+        FROM artifacts
+        JOIN grading_jobs ON grading_jobs.id = artifacts.job_id
+        WHERE artifacts.job_id = $1
+          AND artifacts.attempt = grading_jobs.attempts
+        ORDER BY artifacts.relative_path ASC, artifacts.id ASC
+        "#,
+        job_id
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(ApiError::internal)?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(|row| ArtifactResponse {
+                id: row.id,
+                job_id: row.job_id,
+                attempt: row.attempt,
+                relative_path: row.relative_path,
+                name: row.name,
+                content_type: row.content_type,
+                size_bytes: row.size_bytes,
+                sha256: row.sha256,
+                visibility: row.visibility,
+                created_at: row.created_at,
+            })
+            .collect(),
+    ))
+}
+
+pub async fn download_job_artifact(
+    State(state): State<AppState>,
+    _admin: AdminAuth,
+    Path((job_id, artifact_id)): Path<(Uuid, Uuid)>,
+) -> Result<Response, ApiError> {
+    let row = sqlx::query!(
+        r#"
+        SELECT artifacts.storage_path, artifacts.content_type, artifacts.size_bytes
+        FROM artifacts
+        JOIN grading_jobs ON grading_jobs.id = artifacts.job_id
+        WHERE artifacts.job_id = $1
+          AND artifacts.id = $2
+          AND artifacts.attempt = grading_jobs.attempts
+        "#,
+        job_id,
+        artifact_id
+    )
+    .fetch_optional(&state.db)
+    .await
+    .map_err(ApiError::internal)?
+    .ok_or_else(|| ApiError::not_found("artifact not found"))?;
+
+    let bytes = state.storage.get(&row.storage_path).await.map_err(|error| {
+        tracing::error!(%job_id, %artifact_id, storage_path = %row.storage_path, ?error, "stored artifact object is missing or unreadable");
+        ApiError::internal("failed to read stored artifact")
+    })?;
+
+    let content_type = row
+        .content_type
+        .as_deref()
+        .unwrap_or("application/octet-stream");
+
+    Response::builder()
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, bytes.len().to_string())
+        .header(
+            header::CONTENT_DISPOSITION,
+            "attachment; filename=\"artifact\"",
+        )
+        .body(Body::from(bytes))
+        .map_err(ApiError::internal)
 }
 
 async fn ensure_job_exists(state: &AppState, job_id: Uuid) -> Result<(), ApiError> {

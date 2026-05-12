@@ -92,7 +92,13 @@ pub struct GradingResult {
     pub max_score: f64,
     pub feedback: Option<String>,
     pub tests: Vec<TestResult>,
-    pub artifacts: Vec<String>,
+    pub artifacts: Vec<ResultArtifactRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResultArtifactRef {
+    pub path: String,
+    pub label: Option<String>,
 }
 
 impl GradingResult {
