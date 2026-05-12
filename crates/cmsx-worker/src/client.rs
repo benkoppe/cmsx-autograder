@@ -478,8 +478,7 @@ mod tests {
     #[test]
     fn artifact_outcome_too_large_is_non_retryable() {
         let body = coded_body("artifact_too_large");
-        let outcome =
-            classify_artifact_upload_error(StatusCode::PAYLOAD_TOO_LARGE, &body);
+        let outcome = classify_artifact_upload_error(StatusCode::PAYLOAD_TOO_LARGE, &body);
 
         assert!(matches!(
             outcome,
@@ -489,8 +488,7 @@ mod tests {
 
     #[test]
     fn artifact_outcome_unauthorized_is_non_retryable() {
-        let outcome =
-            classify_artifact_upload_error(StatusCode::UNAUTHORIZED, "unauthorized");
+        let outcome = classify_artifact_upload_error(StatusCode::UNAUTHORIZED, "unauthorized");
 
         assert!(matches!(
             outcome,
@@ -501,8 +499,7 @@ mod tests {
     #[test]
     fn artifact_outcome_server_error_with_upload_failed_code_is_retryable() {
         let body = coded_body("artifact_upload_failed");
-        let outcome =
-            classify_artifact_upload_error(StatusCode::INTERNAL_SERVER_ERROR, &body);
+        let outcome = classify_artifact_upload_error(StatusCode::INTERNAL_SERVER_ERROR, &body);
 
         assert!(matches!(
             outcome,
@@ -512,10 +509,7 @@ mod tests {
 
     #[test]
     fn artifact_outcome_generic_server_error_is_retryable() {
-        let outcome = classify_artifact_upload_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "not json",
-        );
+        let outcome = classify_artifact_upload_error(StatusCode::INTERNAL_SERVER_ERROR, "not json");
 
         assert!(matches!(
             outcome,
@@ -525,8 +519,7 @@ mod tests {
 
     #[test]
     fn artifact_outcome_502_is_retryable() {
-        let outcome =
-            classify_artifact_upload_error(StatusCode::BAD_GATEWAY, "gateway error");
+        let outcome = classify_artifact_upload_error(StatusCode::BAD_GATEWAY, "gateway error");
 
         assert!(matches!(
             outcome,
@@ -536,8 +529,7 @@ mod tests {
 
     #[test]
     fn artifact_outcome_unknown_4xx_is_non_retryable() {
-        let outcome =
-            classify_artifact_upload_error(StatusCode::FORBIDDEN, "forbidden");
+        let outcome = classify_artifact_upload_error(StatusCode::FORBIDDEN, "forbidden");
 
         assert!(matches!(
             outcome,

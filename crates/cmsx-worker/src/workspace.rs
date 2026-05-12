@@ -1464,12 +1464,9 @@ mod tests {
         let workspace = test_workspace_at(temp.path());
 
         for index in 0..=cmsx_core::protocol::ARTIFACT_MAX_COUNT {
-            tokio_fs::write(
-                workspace.artifacts_dir.join(format!("{index}.txt")),
-                b"x",
-            )
-            .await
-            .unwrap();
+            tokio_fs::write(workspace.artifacts_dir.join(format!("{index}.txt")), b"x")
+                .await
+                .unwrap();
         }
 
         let error = discover_artifacts(&workspace).await.unwrap_err();
@@ -1588,13 +1585,10 @@ mod tests {
         tokio_fs::remove_file(&artifact).await.unwrap();
         std::os::unix::fs::symlink(&outside, &artifact).unwrap();
 
-        let error = hash_artifact_file_with_revalidation(
-            &workspace.artifacts_dir,
-            &artifact,
-            "report.txt",
-        )
-        .await
-        .unwrap_err();
+        let error =
+            hash_artifact_file_with_revalidation(&workspace.artifacts_dir, &artifact, "report.txt")
+                .await
+                .unwrap_err();
 
         assert!(matches!(error, ArtifactDiscoveryError::Symlink(_)));
     }
@@ -1607,7 +1601,9 @@ mod tests {
 
         let subdir = workspace.artifacts_dir.join("sub");
         tokio_fs::create_dir_all(&subdir).await.unwrap();
-        tokio_fs::write(subdir.join("file.txt"), b"data").await.unwrap();
+        tokio_fs::write(subdir.join("file.txt"), b"data")
+            .await
+            .unwrap();
 
         // discover first
         let artifacts = discover_artifacts(&workspace).await.unwrap();
