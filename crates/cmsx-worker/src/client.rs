@@ -1,16 +1,18 @@
 use std::{fmt, pin::Pin};
 
+use bytes::Bytes;
 use futures_util::{StreamExt, TryStreamExt};
 use reqwest::{Client, StatusCode};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::AsyncRead;
+use tokio::time::Duration;
 use tokio_util::io::StreamReader;
 use uuid::Uuid;
 
 use cmsx_core::{
     ClaimJobRequest, ClaimJobResponse, ClaimedJob, JobEventBatchRequest, JobFailureRequest,
     JobResultRequest, StartedJobRequest, WorkerHeartbeatRequest, WorkerHeartbeatResponse,
-    protocol::JOB_EVENT_MESSAGE_MAX_BYTES,
+    protocol::{JOB_EVENT_MESSAGE_MAX_BYTES, encode_artifact_relative_path},
 };
 
 use crate::auth::WorkerSigner;
@@ -65,6 +67,28 @@ impl fmt::Display for ClientError {
 }
 
 impl std::error::Error for ClientError {}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ArtifactUploadErrorBody {
+    pub code: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ArtifactUploadOutcome {
+    Uploaded,
+    JobNotActive,
+    CancellationRequested,
+    NonRetryableFailure { body: String },
+    RetryableFailure { body: String },
+}
+
+pub struct ArtifactUpload<'a> {
+    pub artifact_id: Uuid,
+    pub relative_path: &'a str,
+    pub sha256: &'a str,
+    pub size_bytes: u64,
+    pub bytes: Bytes,
+}
 
 pub struct JobFileDownload {
     pub reader: Pin<Box<dyn AsyncRead + Send>>,
@@ -157,6 +181,40 @@ impl ControlPlaneClient {
         Ok(JobFileDownload {
             reader: Box::pin(reader),
         })
+    }
+
+    pub async fn put_artifact(
+        &self,
+        job_id: Uuid,
+        artifact: ArtifactUpload<'_>,
+    ) -> Result<ArtifactUploadOutcome, ClientError> {
+        let path = format!("/workers/jobs/{job_id}/artifacts/{}", artifact.artifact_id);
+        let auth = self
+            .signer
+            .authorization_header("PUT", &path, &artifact.bytes)
+            .map_err(ClientError::Auth)?;
+
+        let encoded_path = encode_artifact_relative_path(artifact.relative_path)
+            .map_err(|error| ClientError::Decode(anyhow::Error::new(error)))?;
+
+        let response = self
+            .http
+            .put(format!("{}{}", self.base_url, path))
+            .header(reqwest::header::AUTHORIZATION, auth)
+            .header("x-cmsx-artifact-relative-path", encoded_path)
+            .header(
+                "x-cmsx-artifact-size-bytes",
+                artifact.size_bytes.to_string(),
+            )
+            .header("x-cmsx-artifact-sha256", artifact.sha256)
+            .header("x-cmsx-artifact-visibility", "staff")
+            .body(artifact.bytes)
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(ClientError::Request)?;
+
+        artifact_upload_outcome(response).await
     }
 
     #[allow(dead_code)] // Used by get_job, which is intentionally retained for future flows.
@@ -290,6 +348,48 @@ async fn read_bounded_error_body(response: reqwest::Response) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+async fn artifact_upload_outcome(
+    response: reqwest::Response,
+) -> Result<ArtifactUploadOutcome, ClientError> {
+    if response.status().is_success() {
+        return Ok(ArtifactUploadOutcome::Uploaded);
+    }
+
+    let status = response.status();
+    let body = read_bounded_error_body(response).await;
+
+    Ok(classify_artifact_upload_error(status, &body))
+}
+
+fn classify_artifact_upload_error(status: StatusCode, body: &str) -> ArtifactUploadOutcome {
+    let parsed = serde_json::from_str::<ArtifactUploadErrorBody>(body).ok();
+    let code = parsed.and_then(|body| body.code);
+
+    match (status, code.as_deref()) {
+        (StatusCode::NOT_FOUND, Some("job_not_active")) => ArtifactUploadOutcome::JobNotActive,
+        (StatusCode::CONFLICT, Some("job_cancellation_requested")) => {
+            ArtifactUploadOutcome::CancellationRequested
+        }
+        (StatusCode::CONFLICT, Some("artifact_duplicate" | "artifact_conflict"))
+        | (StatusCode::BAD_REQUEST, Some("artifact_invalid_metadata" | "artifact_hash_mismatch"))
+        | (StatusCode::PAYLOAD_TOO_LARGE, Some("artifact_too_large"))
+        | (StatusCode::UNAUTHORIZED, _) => ArtifactUploadOutcome::NonRetryableFailure {
+            body: body.to_string(),
+        },
+        (status, Some("artifact_upload_failed")) if status.is_server_error() => {
+            ArtifactUploadOutcome::RetryableFailure {
+                body: body.to_string(),
+            }
+        }
+        (status, _) if status.is_server_error() => ArtifactUploadOutcome::RetryableFailure {
+            body: body.to_string(),
+        },
+        _ => ArtifactUploadOutcome::NonRetryableFailure {
+            body: body.to_string(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,5 +404,144 @@ mod tests {
         assert_eq!(error.status(), Some(StatusCode::NOT_FOUND));
         assert!(error.is_status(StatusCode::NOT_FOUND));
         assert_eq!(error.bounded_body(), Some("missing"));
+    }
+
+    // --- artifact upload outcome classification ---
+
+    fn coded_body(code: &str) -> String {
+        serde_json::json!({"error": "test", "code": code}).to_string()
+    }
+
+    #[test]
+    fn artifact_outcome_job_not_active() {
+        let body = coded_body("job_not_active");
+        let outcome = classify_artifact_upload_error(StatusCode::NOT_FOUND, &body);
+
+        assert!(matches!(outcome, ArtifactUploadOutcome::JobNotActive));
+    }
+
+    #[test]
+    fn artifact_outcome_cancellation_requested() {
+        let body = coded_body("job_cancellation_requested");
+        let outcome = classify_artifact_upload_error(StatusCode::CONFLICT, &body);
+
+        assert!(matches!(
+            outcome,
+            ArtifactUploadOutcome::CancellationRequested
+        ));
+    }
+
+    #[test]
+    fn artifact_outcome_duplicate_is_non_retryable() {
+        let body = coded_body("artifact_duplicate");
+        let outcome = classify_artifact_upload_error(StatusCode::CONFLICT, &body);
+
+        assert!(matches!(
+            outcome,
+            ArtifactUploadOutcome::NonRetryableFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn artifact_outcome_conflict_is_non_retryable() {
+        let body = coded_body("artifact_conflict");
+        let outcome = classify_artifact_upload_error(StatusCode::CONFLICT, &body);
+
+        assert!(matches!(
+            outcome,
+            ArtifactUploadOutcome::NonRetryableFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn artifact_outcome_invalid_metadata_is_non_retryable() {
+        let body = coded_body("artifact_invalid_metadata");
+        let outcome = classify_artifact_upload_error(StatusCode::BAD_REQUEST, &body);
+
+        assert!(matches!(
+            outcome,
+            ArtifactUploadOutcome::NonRetryableFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn artifact_outcome_hash_mismatch_is_non_retryable() {
+        let body = coded_body("artifact_hash_mismatch");
+        let outcome = classify_artifact_upload_error(StatusCode::BAD_REQUEST, &body);
+
+        assert!(matches!(
+            outcome,
+            ArtifactUploadOutcome::NonRetryableFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn artifact_outcome_too_large_is_non_retryable() {
+        let body = coded_body("artifact_too_large");
+        let outcome =
+            classify_artifact_upload_error(StatusCode::PAYLOAD_TOO_LARGE, &body);
+
+        assert!(matches!(
+            outcome,
+            ArtifactUploadOutcome::NonRetryableFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn artifact_outcome_unauthorized_is_non_retryable() {
+        let outcome =
+            classify_artifact_upload_error(StatusCode::UNAUTHORIZED, "unauthorized");
+
+        assert!(matches!(
+            outcome,
+            ArtifactUploadOutcome::NonRetryableFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn artifact_outcome_server_error_with_upload_failed_code_is_retryable() {
+        let body = coded_body("artifact_upload_failed");
+        let outcome =
+            classify_artifact_upload_error(StatusCode::INTERNAL_SERVER_ERROR, &body);
+
+        assert!(matches!(
+            outcome,
+            ArtifactUploadOutcome::RetryableFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn artifact_outcome_generic_server_error_is_retryable() {
+        let outcome = classify_artifact_upload_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "not json",
+        );
+
+        assert!(matches!(
+            outcome,
+            ArtifactUploadOutcome::RetryableFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn artifact_outcome_502_is_retryable() {
+        let outcome =
+            classify_artifact_upload_error(StatusCode::BAD_GATEWAY, "gateway error");
+
+        assert!(matches!(
+            outcome,
+            ArtifactUploadOutcome::RetryableFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn artifact_outcome_unknown_4xx_is_non_retryable() {
+        let outcome =
+            classify_artifact_upload_error(StatusCode::FORBIDDEN, "forbidden");
+
+        assert!(matches!(
+            outcome,
+            ArtifactUploadOutcome::NonRetryableFailure { .. }
+        ));
     }
 }

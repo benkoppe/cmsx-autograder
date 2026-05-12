@@ -1,7 +1,9 @@
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{StatusCode, header},
+    response::Response,
     routing::{get, post},
 };
 use chrono::{DateTime, Duration, Utc};
@@ -28,6 +30,11 @@ pub fn router() -> Router<AppState> {
         .route("/jobs/{job_id}", get(get_job))
         .route("/jobs/{job_id}/events", get(get_job_events))
         .route("/jobs/{job_id}/cancel", post(cancel_job))
+        .route("/jobs/{job_id}/artifacts", get(list_job_artifacts))
+        .route(
+            "/jobs/{job_id}/artifacts/{artifact_id}",
+            get(download_job_artifact),
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,6 +94,20 @@ pub struct JobEventResponse {
     pub visibility: String,
     pub message: String,
     pub data: Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ArtifactResponse {
+    pub id: Uuid,
+    pub job_id: Uuid,
+    pub attempt: i32,
+    pub relative_path: String,
+    pub name: String,
+    pub content_type: Option<String>,
+    pub size_bytes: i64,
+    pub sha256: String,
+    pub visibility: String,
+    pub created_at: DateTime<Utc>,
 }
 
 pub async fn get_job(
@@ -332,6 +353,99 @@ pub async fn cancel_job(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub async fn list_job_artifacts(
+    State(state): State<AppState>,
+    _admin: AdminAuth,
+    Path(job_id): Path<Uuid>,
+) -> Result<Json<Vec<ArtifactResponse>>, ApiError> {
+    ensure_job_exists(&state, job_id).await?;
+
+    let rows = sqlx::query!(
+        r#"
+        SELECT
+            artifacts.id,
+            artifacts.job_id,
+            artifacts.attempt,
+            artifacts.relative_path,
+            artifacts.name,
+            artifacts.content_type,
+            artifacts.size_bytes,
+            artifacts.sha256,
+            artifacts.visibility,
+            artifacts.created_at
+        FROM artifacts
+        JOIN grading_jobs ON grading_jobs.id = artifacts.job_id
+        WHERE artifacts.job_id = $1
+          AND artifacts.attempt = grading_jobs.attempts
+        ORDER BY artifacts.relative_path ASC, artifacts.id ASC
+        "#,
+        job_id
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(ApiError::internal)?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(|row| ArtifactResponse {
+                id: row.id,
+                job_id: row.job_id,
+                attempt: row.attempt,
+                relative_path: row.relative_path,
+                name: row.name,
+                content_type: row.content_type,
+                size_bytes: row.size_bytes,
+                sha256: row.sha256,
+                visibility: row.visibility,
+                created_at: row.created_at,
+            })
+            .collect(),
+    ))
+}
+
+pub async fn download_job_artifact(
+    State(state): State<AppState>,
+    _admin: AdminAuth,
+    Path((job_id, artifact_id)): Path<(Uuid, Uuid)>,
+) -> Result<Response, ApiError> {
+    let row = sqlx::query!(
+        r#"
+        SELECT artifacts.storage_path, artifacts.content_type, artifacts.size_bytes
+        FROM artifacts
+        JOIN grading_jobs ON grading_jobs.id = artifacts.job_id
+        WHERE artifacts.job_id = $1
+          AND artifacts.id = $2
+          AND artifacts.attempt = grading_jobs.attempts
+        "#,
+        job_id,
+        artifact_id
+    )
+    .fetch_optional(&state.db)
+    .await
+    .map_err(ApiError::internal)?
+    .ok_or_else(|| ApiError::not_found("artifact not found"))?;
+
+    let bytes = state.storage.get(&row.storage_path).await.map_err(|error| {
+        tracing::error!(%job_id, %artifact_id, storage_path = %row.storage_path, ?error, "stored artifact object is missing or unreadable");
+        ApiError::internal("failed to read stored artifact")
+    })?;
+
+    let content_type = row
+        .content_type
+        .as_deref()
+        .unwrap_or("application/octet-stream");
+
+    Response::builder()
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, bytes.len().to_string())
+        .header(
+            header::CONTENT_DISPOSITION,
+            "attachment; filename=\"artifact\"",
+        )
+        .body(Body::from(bytes))
+        .map_err(ApiError::internal)
+}
+
 async fn ensure_job_exists(state: &AppState, job_id: Uuid) -> Result<(), ApiError> {
     let exists = sqlx::query_scalar!(
         r#"
@@ -357,7 +471,7 @@ async fn ensure_job_exists(state: &AppState, job_id: Uuid) -> Result<(), ApiErro
 
 #[cfg(test)]
 mod tests {
-    use axum::http::StatusCode;
+    use axum::{body::Body, http::StatusCode};
     use serde_json::json;
     use uuid::Uuid;
 
@@ -367,6 +481,8 @@ mod tests {
     };
 
     use crate::test_support;
+
+    const SHA256_HELLO: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
 
     fn cancelled_result_request() -> JobResultRequest {
         JobResultRequest {
@@ -1179,6 +1295,848 @@ mod tests {
         assert_eq!(
             row.result_status.as_deref(),
             Some(ResultStatus::Cancelled.as_str())
+        );
+    }
+
+    // --- artifact upload route tests ---
+
+    #[tokio::test]
+    async fn put_artifact_accepts_valid_upload() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_claimed_job(&app).await;
+        let artifact_id = Uuid::now_v7();
+        let body = b"artifact content";
+
+        let response = test_support::worker_put_artifact(
+            &app.app,
+            &setup.private_key,
+            setup.job_id,
+            artifact_id,
+            "report.txt",
+            body,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn put_artifact_rejects_missing_auth() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_claimed_job(&app).await;
+        let artifact_id = Uuid::now_v7();
+
+        let response = test_support::request(
+            &app.app,
+            axum::http::Request::builder()
+                .method("PUT")
+                .uri(format!(
+                    "/workers/jobs/{}/artifacts/{artifact_id}",
+                    setup.job_id
+                ))
+                .header("x-cmsx-artifact-relative-path", "report.txt")
+                .header("x-cmsx-artifact-size-bytes", "5")
+                .header("x-cmsx-artifact-sha256", "a".repeat(64))
+                .header("x-cmsx-artifact-visibility", "staff")
+                .body(Body::from(b"hello".to_vec()))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn put_artifact_rejects_uppercase_sha_with_coded_error() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_claimed_job(&app).await;
+        let artifact_id = Uuid::now_v7();
+        let body = b"hello";
+        let upper_sha = "A".repeat(64);
+
+        let path = format!("/workers/jobs/{}/artifacts/{artifact_id}", setup.job_id);
+        let auth =
+            test_support::worker_authorization_header(&setup.private_key, "PUT", &path, body);
+
+        let response = test_support::request(
+            &app.app,
+            axum::http::Request::builder()
+                .method("PUT")
+                .uri(&path)
+                .header(axum::http::header::AUTHORIZATION, auth)
+                .header("x-cmsx-artifact-relative-path", "report.txt")
+                .header("x-cmsx-artifact-size-bytes", "5")
+                .header("x-cmsx-artifact-sha256", upper_sha)
+                .header("x-cmsx-artifact-visibility", "staff")
+                .body(Body::from(body.to_vec()))
+                .unwrap(),
+        )
+        .await;
+
+        let (status, body) = test_support::response_json(response).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "artifact_invalid_metadata");
+    }
+
+    #[tokio::test]
+    async fn put_artifact_is_idempotent_for_same_metadata() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_claimed_job(&app).await;
+        let artifact_id = Uuid::now_v7();
+        let body = b"artifact content";
+
+        let response1 = test_support::worker_put_artifact(
+            &app.app,
+            &setup.private_key,
+            setup.job_id,
+            artifact_id,
+            "report.txt",
+            body,
+        )
+        .await;
+        assert_eq!(response1.status(), StatusCode::NO_CONTENT);
+
+        let response2 = test_support::worker_put_artifact(
+            &app.app,
+            &setup.private_key,
+            setup.job_id,
+            artifact_id,
+            "report.txt",
+            body,
+        )
+        .await;
+        assert_eq!(response2.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn put_artifact_conflicts_for_same_id_different_content() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_claimed_job(&app).await;
+        let artifact_id = Uuid::now_v7();
+
+        let response1 = test_support::worker_put_artifact(
+            &app.app,
+            &setup.private_key,
+            setup.job_id,
+            artifact_id,
+            "report.txt",
+            b"original",
+        )
+        .await;
+        assert_eq!(response1.status(), StatusCode::NO_CONTENT);
+
+        let response2 = test_support::worker_put_artifact(
+            &app.app,
+            &setup.private_key,
+            setup.job_id,
+            artifact_id,
+            "report.txt",
+            b"different",
+        )
+        .await;
+
+        let (status, body) = test_support::response_json(response2).await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "artifact_conflict");
+    }
+
+    #[tokio::test]
+    async fn put_artifact_duplicate_for_same_path_different_id() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_claimed_job(&app).await;
+        let body = b"content";
+
+        let response1 = test_support::worker_put_artifact(
+            &app.app,
+            &setup.private_key,
+            setup.job_id,
+            Uuid::now_v7(),
+            "report.txt",
+            body,
+        )
+        .await;
+        assert_eq!(response1.status(), StatusCode::NO_CONTENT);
+
+        let response2 = test_support::worker_put_artifact(
+            &app.app,
+            &setup.private_key,
+            setup.job_id,
+            Uuid::now_v7(),
+            "report.txt",
+            body,
+        )
+        .await;
+
+        let (status, body) = test_support::response_json(response2).await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "artifact_duplicate");
+    }
+
+    #[tokio::test]
+    async fn put_artifact_returns_cancellation_requested() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_running_job_with_cancel(&app).await;
+
+        let response = test_support::worker_put_artifact(
+            &app.app,
+            &setup.private_key,
+            setup.job_id,
+            Uuid::now_v7(),
+            "report.txt",
+            b"content",
+        )
+        .await;
+
+        let (status, body) = test_support::response_json(response).await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "job_cancellation_requested");
+    }
+
+    #[tokio::test]
+    async fn put_artifact_returns_not_active_for_completed_job() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_completed_job(&app).await;
+
+        let response = test_support::worker_put_artifact(
+            &app.app,
+            &setup.private_key,
+            setup.job_id,
+            Uuid::now_v7(),
+            "report.txt",
+            b"content",
+        )
+        .await;
+
+        let (status, body) = test_support::response_json(response).await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "job_not_active");
+    }
+
+    // --- admin artifact list/download tests ---
+
+    #[tokio::test]
+    async fn list_artifacts_rejects_missing_admin_token() {
+        let app = test_support::test_app().await;
+        let job_id = Uuid::now_v7();
+
+        let response = test_support::get(&app.app, &format!("/jobs/{job_id}/artifacts")).await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn list_artifacts_returns_not_found_for_missing_job() {
+        let app = test_support::test_app().await;
+        let job_id = Uuid::now_v7();
+
+        let response =
+            test_support::admin_get(&app.app, &format!("/jobs/{job_id}/artifacts")).await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn list_artifacts_returns_uploaded_artifacts_for_current_attempt() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_claimed_job(&app).await;
+        let body = b"report data";
+
+        let upload = test_support::worker_put_artifact(
+            &app.app,
+            &setup.private_key,
+            setup.job_id,
+            Uuid::now_v7(),
+            "reports/summary.txt",
+            body,
+        )
+        .await;
+        assert_eq!(upload.status(), StatusCode::NO_CONTENT);
+
+        let response =
+            test_support::admin_get(&app.app, &format!("/jobs/{}/artifacts", setup.job_id)).await;
+        let (status, body) = test_support::response_json(response).await;
+        let artifacts = body.as_array().expect("should be an array");
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0]["relative_path"], "reports/summary.txt");
+        assert_eq!(artifacts[0]["name"], "summary.txt");
+        assert_eq!(artifacts[0]["visibility"], "staff");
+        assert_eq!(artifacts[0]["attempt"], 1);
+    }
+
+    #[tokio::test]
+    async fn list_artifacts_ordered_by_relative_path() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_claimed_job(&app).await;
+
+        for path in ["b.txt", "a.txt", "c/d.txt"] {
+            let response = test_support::worker_put_artifact(
+                &app.app,
+                &setup.private_key,
+                setup.job_id,
+                Uuid::now_v7(),
+                path,
+                path.as_bytes(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        }
+
+        let response =
+            test_support::admin_get(&app.app, &format!("/jobs/{}/artifacts", setup.job_id)).await;
+        let (status, body) = test_support::response_json(response).await;
+        let artifacts = body.as_array().unwrap();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(artifacts.len(), 3);
+        assert_eq!(artifacts[0]["relative_path"], "a.txt");
+        assert_eq!(artifacts[1]["relative_path"], "b.txt");
+        assert_eq!(artifacts[2]["relative_path"], "c/d.txt");
+    }
+
+    #[tokio::test]
+    async fn download_artifact_returns_bytes_with_safe_headers() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_claimed_job(&app).await;
+        let artifact_id = Uuid::now_v7();
+        let artifact_body = b"report content here";
+
+        let upload = test_support::worker_put_artifact(
+            &app.app,
+            &setup.private_key,
+            setup.job_id,
+            artifact_id,
+            "report.txt",
+            artifact_body,
+        )
+        .await;
+        assert_eq!(upload.status(), StatusCode::NO_CONTENT);
+
+        let response = test_support::admin_get(
+            &app.app,
+            &format!("/jobs/{}/artifacts/{artifact_id}", setup.job_id),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            response.headers().get("content-disposition").unwrap(),
+            "attachment; filename=\"artifact\""
+        );
+
+        let (_, bytes) = test_support::response_body(response).await;
+
+        assert_eq!(bytes.as_ref(), artifact_body);
+    }
+
+    #[tokio::test]
+    async fn download_artifact_rejects_wrong_job_id() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_claimed_job(&app).await;
+        let artifact_id = Uuid::now_v7();
+
+        let upload = test_support::worker_put_artifact(
+            &app.app,
+            &setup.private_key,
+            setup.job_id,
+            artifact_id,
+            "report.txt",
+            b"data",
+        )
+        .await;
+        assert_eq!(upload.status(), StatusCode::NO_CONTENT);
+
+        let wrong_job_id = Uuid::now_v7();
+        let response = test_support::admin_get(
+            &app.app,
+            &format!("/jobs/{wrong_job_id}/artifacts/{artifact_id}"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // --- post_result artifact ref validation tests ---
+
+    #[tokio::test]
+    async fn post_result_rejects_missing_artifact_ref_without_terminalizing() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_running_job(&app).await;
+
+        let request = JobResultRequest {
+            result: GradingResult {
+                schema_version: "2".to_string(),
+                status: ResultStatus::Passed,
+                score: 10.0,
+                max_score: 100.0,
+                feedback: None,
+                tests: vec![],
+                artifacts: vec![cmsx_core::ResultArtifactRef {
+                    path: "nonexistent.txt".to_string(),
+                    label: None,
+                }],
+            },
+            duration_ms: Some(100),
+            stdout_summary: None,
+            stderr_summary: None,
+        };
+
+        let response = test_support::worker_post_json(
+            &app.app,
+            &setup.private_key,
+            &format!("/workers/jobs/{}/result", setup.job_id),
+            &request,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // verify job is NOT terminalized
+        let job_response =
+            test_support::admin_get(&app.app, &format!("/jobs/{}", setup.job_id)).await;
+        let (_, job_body) = test_support::response_json(job_response).await;
+
+        assert_eq!(job_body["status"], JobStatus::Running.as_str());
+        assert!(job_body["result"].is_null());
+    }
+
+    #[tokio::test]
+    async fn post_result_rejects_duplicate_artifact_refs() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_running_job(&app).await;
+
+        // upload an artifact first
+        let upload = test_support::worker_put_artifact(
+            &app.app,
+            &setup.private_key,
+            setup.job_id,
+            Uuid::now_v7(),
+            "report.txt",
+            b"data",
+        )
+        .await;
+        assert_eq!(upload.status(), StatusCode::NO_CONTENT);
+
+        let request = JobResultRequest {
+            result: GradingResult {
+                schema_version: "2".to_string(),
+                status: ResultStatus::Passed,
+                score: 10.0,
+                max_score: 100.0,
+                feedback: None,
+                tests: vec![],
+                artifacts: vec![
+                    cmsx_core::ResultArtifactRef {
+                        path: "report.txt".to_string(),
+                        label: None,
+                    },
+                    cmsx_core::ResultArtifactRef {
+                        path: "report.txt".to_string(),
+                        label: Some("dup".to_string()),
+                    },
+                ],
+            },
+            duration_ms: Some(100),
+            stdout_summary: None,
+            stderr_summary: None,
+        };
+
+        let response = test_support::worker_post_json(
+            &app.app,
+            &setup.private_key,
+            &format!("/workers/jobs/{}/result", setup.job_id),
+            &request,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn post_result_accepts_uploaded_artifact_ref() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_running_job(&app).await;
+
+        let upload = test_support::worker_put_artifact(
+            &app.app,
+            &setup.private_key,
+            setup.job_id,
+            Uuid::now_v7(),
+            "report.txt",
+            b"data",
+        )
+        .await;
+        assert_eq!(upload.status(), StatusCode::NO_CONTENT);
+
+        let request = JobResultRequest {
+            result: GradingResult {
+                schema_version: "2".to_string(),
+                status: ResultStatus::Passed,
+                score: 10.0,
+                max_score: 100.0,
+                feedback: None,
+                tests: vec![],
+                artifacts: vec![cmsx_core::ResultArtifactRef {
+                    path: "report.txt".to_string(),
+                    label: Some("Report".to_string()),
+                }],
+            },
+            duration_ms: Some(100),
+            stdout_summary: None,
+            stderr_summary: None,
+        };
+
+        let response = test_support::worker_post_json(
+            &app.app,
+            &setup.private_key,
+            &format!("/workers/jobs/{}/result", setup.job_id),
+            &request,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn post_result_accepts_empty_artifacts() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_running_job(&app).await;
+
+        let request = JobResultRequest {
+            result: GradingResult {
+                schema_version: "2".to_string(),
+                status: ResultStatus::Passed,
+                score: 10.0,
+                max_score: 100.0,
+                feedback: None,
+                tests: vec![],
+                artifacts: vec![],
+            },
+            duration_ms: Some(100),
+            stdout_summary: None,
+            stderr_summary: None,
+        };
+
+        let response = test_support::worker_post_json(
+            &app.app,
+            &setup.private_key,
+            &format!("/workers/jobs/{}/result", setup.job_id),
+            &request,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn put_artifact_accepts_body_larger_than_one_mib() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_claimed_job(&app).await;
+        // 1.5 MiB — larger than WorkerJson's 1 MiB cap
+        let body: Vec<u8> = vec![0u8; 1024 * 1024 + 512];
+        let response = test_support::worker_put_artifact(
+            &app.app,
+            &setup.private_key,
+            setup.job_id,
+            Uuid::now_v7(),
+            "large.bin",
+            &body,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn put_artifact_rejects_size_mismatch_with_coded_error() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_claimed_job(&app).await;
+        let artifact_id = Uuid::now_v7();
+        let body = b"hello";
+        let path = format!("/workers/jobs/{}/artifacts/{artifact_id}", setup.job_id);
+        let auth =
+            test_support::worker_authorization_header(&setup.private_key, "PUT", &path, body);
+
+        let response = test_support::request(
+            &app.app,
+            axum::http::Request::builder()
+                .method("PUT")
+                .uri(&path)
+                .header(axum::http::header::AUTHORIZATION, auth)
+                .header("x-cmsx-artifact-relative-path", "report.txt")
+                .header("x-cmsx-artifact-size-bytes", "6") // wrong: body is 5 bytes
+                .header("x-cmsx-artifact-sha256", SHA256_HELLO)
+                .header("x-cmsx-artifact-visibility", "staff")
+                .body(Body::from(body.to_vec()))
+                .unwrap(),
+        )
+        .await;
+
+        let (status, body) = test_support::response_json(response).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "artifact_invalid_metadata");
+    }
+
+    #[tokio::test]
+    async fn put_artifact_rejects_hash_mismatch_with_coded_error() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_claimed_job(&app).await;
+        let artifact_id = Uuid::now_v7();
+        let body = b"hello";
+        let wrong_sha256 = "a".repeat(64); // valid format, wrong value
+        let path = format!("/workers/jobs/{}/artifacts/{artifact_id}", setup.job_id);
+        let auth =
+            test_support::worker_authorization_header(&setup.private_key, "PUT", &path, body);
+
+        let response = test_support::request(
+            &app.app,
+            axum::http::Request::builder()
+                .method("PUT")
+                .uri(&path)
+                .header(axum::http::header::AUTHORIZATION, auth)
+                .header("x-cmsx-artifact-relative-path", "report.txt")
+                .header("x-cmsx-artifact-size-bytes", "5")
+                .header("x-cmsx-artifact-sha256", wrong_sha256)
+                .header("x-cmsx-artifact-visibility", "staff")
+                .body(Body::from(body.to_vec()))
+                .unwrap(),
+        )
+        .await;
+
+        let (status, body) = test_support::response_json(response).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "artifact_hash_mismatch");
+    }
+
+    #[tokio::test]
+    async fn put_artifact_rejects_malformed_percent_path_with_coded_error() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_claimed_job(&app).await;
+        let artifact_id = Uuid::now_v7();
+        let body = b"hello";
+        let path = format!("/workers/jobs/{}/artifacts/{artifact_id}", setup.job_id);
+        let auth =
+            test_support::worker_authorization_header(&setup.private_key, "PUT", &path, body);
+
+        let response = test_support::request(
+            &app.app,
+            axum::http::Request::builder()
+                .method("PUT")
+                .uri(&path)
+                .header(axum::http::header::AUTHORIZATION, auth)
+                .header("x-cmsx-artifact-relative-path", "bad%GGpath") // malformed %GG
+                .header("x-cmsx-artifact-size-bytes", "5")
+                .header("x-cmsx-artifact-sha256", SHA256_HELLO)
+                .header("x-cmsx-artifact-visibility", "staff")
+                .body(Body::from(body.to_vec()))
+                .unwrap(),
+        )
+        .await;
+
+        let (status, body) = test_support::response_json(response).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "artifact_invalid_metadata");
+    }
+
+    #[tokio::test]
+    async fn post_result_rejects_schema_version_v1() {
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_running_job(&app).await;
+
+        let request = JobResultRequest {
+            result: GradingResult {
+                schema_version: "1".to_string(),
+                status: ResultStatus::Passed,
+                score: 10.0,
+                max_score: 100.0,
+                feedback: None,
+                tests: vec![],
+                artifacts: vec![],
+            },
+            duration_ms: Some(100),
+            stdout_summary: None,
+            stderr_summary: None,
+        };
+
+        let response = test_support::worker_post_json(
+            &app.app,
+            &setup.private_key,
+            &format!("/workers/jobs/{}/result", setup.job_id),
+            &request,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // job must not be terminalized
+        let job_response =
+            test_support::admin_get(&app.app, &format!("/jobs/{}", setup.job_id)).await;
+        let (_, job_body) = test_support::response_json(job_response).await;
+
+        assert_eq!(job_body["status"], JobStatus::Running.as_str());
+        assert!(job_body["result"].is_null());
+    }
+
+    #[tokio::test]
+    async fn post_result_running_accepts_cancelled_result_without_cancel_request() {
+        // running + no cancellation requested + cancelled result = accepted
+        // This is the subtle case most likely to regress from the post_result refactor.
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_running_job(&app).await;
+        // deliberately no cancel request
+
+        let response = test_support::worker_post_json(
+            &app.app,
+            &setup.private_key,
+            &format!("/workers/jobs/{}/result", setup.job_id),
+            &cancelled_result_request(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let row = sqlx::query!(
+            r#"
+        SELECT grading_jobs.status, grading_results.status AS "result_status?"
+        FROM grading_jobs
+        LEFT JOIN grading_results ON grading_results.job_id = grading_jobs.id
+        WHERE grading_jobs.id = $1
+        "#,
+            setup.job_id,
+        )
+        .fetch_one(&app.db)
+        .await
+        .expect("failed to load job after cancelled result");
+
+        assert_eq!(row.status, JobStatus::Cancelled.as_str());
+        assert_eq!(
+            row.result_status.as_deref(),
+            Some(ResultStatus::Cancelled.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn post_result_claimed_rejects_cancelled_result_without_cancel_request() {
+        // claimed + no cancellation requested + cancelled result = rejected
+        // claimed jobs only accept cancelled results when cancellation was explicitly requested.
+        let app = test_support::test_app().await;
+        let setup = test_support::setup_claimed_job(&app).await;
+        // claimed but NOT started, NOT cancelled
+
+        let response = test_support::worker_post_json(
+            &app.app,
+            &setup.private_key,
+            &format!("/workers/jobs/{}/result", setup.job_id),
+            &cancelled_result_request(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let row = sqlx::query!(
+            r#"
+        SELECT grading_jobs.status, grading_results.status AS "result_status?"
+        FROM grading_jobs
+        LEFT JOIN grading_results ON grading_results.job_id = grading_jobs.id
+        WHERE grading_jobs.id = $1
+        "#,
+            setup.job_id,
+        )
+        .fetch_one(&app.db)
+        .await
+        .expect("failed to load job after rejected cancelled result");
+
+        assert_eq!(row.status, JobStatus::Claimed.as_str());
+        assert!(row.result_status.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_artifacts_hides_prior_attempt_artifacts() {
+        let app = test_support::test_app().await;
+        // setup_claimed_job provisions a worker and claims the job, setting attempts = 1
+        let setup = test_support::setup_claimed_job(&app).await;
+
+        // upload an artifact for attempt 1
+        let upload = test_support::worker_put_artifact(
+            &app.app,
+            &setup.private_key,
+            setup.job_id,
+            Uuid::now_v7(),
+            "report.txt",
+            b"attempt 1 data",
+        )
+        .await;
+        assert_eq!(upload.status(), StatusCode::NO_CONTENT);
+
+        // verify artifact is visible while still on attempt 1
+        let list_attempt1 =
+            test_support::admin_get(&app.app, &format!("/jobs/{}/artifacts", setup.job_id)).await;
+        let (_, body1) = test_support::response_json(list_attempt1).await;
+        assert_eq!(
+            body1.as_array().unwrap().len(),
+            1,
+            "attempt 1 artifact should be visible before requeue"
+        );
+
+        // requeue the job (simulate lease loss / retry), keeping attempts = 1
+        // so the next claim increments attempts to 2
+        sqlx::query!(
+            r#"
+        UPDATE grading_jobs
+        SET status = 'queued',
+            worker_id = NULL,
+            claimed_at = NULL,
+            started_at = NULL,
+            lease_expires_at = NULL,
+            last_heartbeat_at = NULL
+        WHERE id = $1
+        "#,
+            setup.job_id,
+        )
+        .execute(&app.db)
+        .await
+        .expect("failed to requeue job for second attempt");
+
+        // claim again with the same worker — attempts increments to 2
+        let claim_response = test_support::worker_post_json(
+            &app.app,
+            &setup.private_key,
+            "/workers/jobs/claim",
+            &cmsx_core::ClaimJobRequest {
+                available_slots: 1,
+                wait_seconds: Some(0),
+            },
+        )
+        .await;
+        let (claim_status, claim_body) = test_support::response_json(claim_response).await;
+        assert_eq!(claim_status, StatusCode::OK);
+        assert_eq!(
+            claim_body["jobs"][0]["id"],
+            setup.job_id.to_string(),
+            "job should be re-claimed for attempt 2"
+        );
+
+        // default list filters to grading_jobs.attempts = 2, which has no artifacts
+        let list_attempt2 =
+            test_support::admin_get(&app.app, &format!("/jobs/{}/artifacts", setup.job_id)).await;
+        let (status, body2) = test_support::response_json(list_attempt2).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body2.as_array().unwrap().is_empty(),
+            "prior attempt artifacts must not appear in default listing"
         );
     }
 }

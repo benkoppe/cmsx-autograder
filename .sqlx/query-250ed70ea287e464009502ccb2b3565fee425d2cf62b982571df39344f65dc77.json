@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            grading_jobs.status,\n            grading_jobs.worker_id,\n            grading_jobs.attempts,\n            grading_jobs.lease_expires_at,\n            grading_jobs.cancel_requested_at,\n            assignments.max_score AS assignment_max_score\n        FROM grading_jobs\n        JOIN assignments ON assignments.id = grading_jobs.assignment_id\n        WHERE grading_jobs.id = $1\n        FOR UPDATE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "worker_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "lease_expires_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 4,
+        "name": "cancel_requested_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "assignment_max_score",
+        "type_info": "Float8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "250ed70ea287e464009502ccb2b3565fee425d2cf62b982571df39344f65dc77"
+}

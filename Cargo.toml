@@ -27,6 +27,7 @@ indoc = "2"
 jwt-simple = "0.12"
 libc = "0.2"
 object_store = { version = "0.13", features = ["aws"] }
+percent-encoding = "2"
 predicates = "3"
 reqwest = { version = "0.13", features = [
   "rustls",

@@ -88,6 +88,18 @@ impl Storage {
         self.key(format!("submissions/{submission_id}/{submission_file_id}"))
     }
 
+    pub fn artifact_key(
+        &self,
+        job_id: Uuid,
+        attempt: i32,
+        artifact_id: Uuid,
+        sha256: &str,
+    ) -> String {
+        self.key(format!(
+            "artifacts/{job_id}/{attempt}/{artifact_id}/{sha256}"
+        ))
+    }
+
     fn key(&self, suffix: String) -> String {
         if self.prefix.is_empty() {
             suffix
@@ -118,6 +130,26 @@ impl Storage {
             .context("failed to delete stored object")?;
 
         Ok(())
+    }
+
+    pub async fn put_artifact_bytes(
+        &self,
+        job_id: Uuid,
+        attempt: i32,
+        artifact_id: Uuid,
+        sha256: &str,
+        bytes: Bytes,
+    ) -> Result<String> {
+        let key = self.artifact_key(job_id, attempt, artifact_id, sha256);
+        let path = Path::from(key.clone());
+
+        self.store
+            .as_ref()
+            .put(&path, PutPayload::from_bytes(bytes))
+            .await
+            .context("failed to upload artifact bytes")?;
+
+        Ok(key)
     }
 }
 

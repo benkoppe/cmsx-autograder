@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT artifacts.storage_path, artifacts.content_type, artifacts.size_bytes\n        FROM artifacts\n        JOIN grading_jobs ON grading_jobs.id = artifacts.job_id\n        WHERE artifacts.job_id = $1\n          AND artifacts.id = $2\n          AND artifacts.attempt = grading_jobs.attempts\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "storage_path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "content_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "size_bytes",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "346f4c8bc51c03c04fa6ac882470508084fa526a849f5950b548910a4e47117b"
+}

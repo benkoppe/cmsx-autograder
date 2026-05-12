@@ -221,18 +221,21 @@ ON job_events(job_id, timestamp);
 CREATE TABLE artifacts (
   id UUID PRIMARY KEY,
   job_id UUID NOT NULL REFERENCES grading_jobs(id) ON DELETE CASCADE,
-  path TEXT NOT NULL,
-  name TEXT NOT NULL,
+  attempt INTEGER NOT NULL CHECK (attempt > 0),
+  relative_path TEXT NOT NULL CHECK (relative_path <> ''),
+  name TEXT NOT NULL CHECK (name <> ''),
+  storage_path TEXT NOT NULL,
   content_type TEXT,
   size_bytes BIGINT NOT NULL CHECK (size_bytes >= 0),
-  sha256 TEXT NOT NULL,
+  sha256 TEXT NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
   visibility TEXT NOT NULL CHECK (
     visibility IN ('student', 'staff', 'internal')
   ),
   created_at TIMESTAMPTZ NOT NULL
 );
 
-CREATE INDEX idx_artifacts_job_id
-ON artifacts(job_id);
+CREATE INDEX idx_artifacts_job_attempt
+ON artifacts(job_id, attempt);
 
-
+CREATE UNIQUE INDEX idx_artifacts_job_attempt_relative_path
+ON artifacts(job_id, attempt, relative_path);

@@ -27,7 +27,8 @@ use cmsx_core::{
     ResultStatus, TestResult, WorkerAuthClaims,
     protocol::{
         GRADING_RESULT_SCHEMA_VERSION, JobEventStream, JobEventVisibility, WORKER_AUTH_SCHEME,
-        WORKER_JWT_AUDIENCE, WORKER_JWT_VALIDITY_SECONDS, job_event_type,
+        WORKER_JWT_AUDIENCE, WORKER_JWT_VALIDITY_SECONDS, encode_artifact_relative_path,
+        job_event_type,
     },
 };
 
@@ -631,4 +632,48 @@ fn quote_identifier(identifier: &str) -> String {
 
 pub fn now_event_timestamp() -> chrono::DateTime<Utc> {
     Utc::now()
+}
+
+pub async fn worker_put_artifact(
+    app: &Router,
+    private_key_base64: &str,
+    job_id: Uuid,
+    artifact_id: Uuid,
+    relative_path: &str,
+    body: &[u8],
+) -> Response {
+    let path = format!("/workers/jobs/{job_id}/artifacts/{artifact_id}");
+    let body_sha256 = hex::encode(Sha256::digest(body));
+    let encoded_path =
+        encode_artifact_relative_path(relative_path).expect("invalid test artifact path");
+    let auth = worker_authorization_header(private_key_base64, "PUT", &path, body);
+
+    request(
+        app,
+        Request::builder()
+            .method("PUT")
+            .uri(&path)
+            .header(header::AUTHORIZATION, auth)
+            .header("x-cmsx-artifact-relative-path", encoded_path)
+            .header("x-cmsx-artifact-size-bytes", body.len().to_string())
+            .header("x-cmsx-artifact-sha256", body_sha256)
+            .header("x-cmsx-artifact-visibility", "staff")
+            .body(Body::from(body.to_vec()))
+            .expect("failed to build artifact request"),
+    )
+    .await
+}
+
+pub async fn setup_running_job_with_cancel(app: &TestApp) -> TestClaimedJob {
+    let running = setup_running_job(app).await;
+
+    let response = admin_post_json(
+        &app.app,
+        &format!("/jobs/{}/cancel", running.job_id),
+        &json!({}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    running
 }

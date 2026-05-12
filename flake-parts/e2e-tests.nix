@@ -60,6 +60,7 @@
           extraAssertionsScript ? "",
         }:
         /* python */ ''
+          import hashlib
           import json
           import time
           import shlex
@@ -216,6 +217,48 @@
           assert terminal_job["result"]["score"] == 10
           assert terminal_job["result"]["max_score"] == 10
 
+          expected_artifact = b"hello-python artifact summary\n"
+          expected_artifact_sha256 = hashlib.sha256(expected_artifact).hexdigest()
+
+          artifacts = json.loads(machine.succeed(
+              f"curl -fsS -H {auth_header_arg} ${serverUrl}/jobs/{job_id}/artifacts"
+          ))
+
+          assert len(artifacts) == 1, artifacts
+          artifact = artifacts[0]
+          artifact_id = artifact["id"]
+
+          assert artifact["job_id"] == job_id
+          assert artifact["attempt"] == 1
+          assert artifact["relative_path"] == "reports/summary.txt"
+          assert artifact["name"] == "summary.txt"
+          assert artifact["content_type"] is None
+          assert artifact["size_bytes"] == len(expected_artifact)
+          assert artifact["sha256"] == expected_artifact_sha256
+          assert artifact["visibility"] == "staff"
+
+          machine.succeed(textwrap.dedent(f"""
+            curl -fsS \
+              -D /tmp/artifact-summary.headers \
+              -o /tmp/artifact-summary.txt \
+              -H {auth_header_arg} \
+              ${serverUrl}/jobs/{job_id}/artifacts/{artifact_id}
+          """))
+
+          downloaded_artifact = machine.succeed(
+              "python3 -c 'from pathlib import Path; import sys; sys.stdout.write(Path(\"/tmp/artifact-summary.txt\").read_text())'"
+          )
+          assert downloaded_artifact == expected_artifact.decode(), downloaded_artifact
+
+          artifact_headers = machine.succeed(
+              "python3 -c 'from pathlib import Path; print(Path(\"/tmp/artifact-summary.headers\").read_text())'"
+          )
+
+          normalized_artifact_headers = artifact_headers.lower()
+          assert "content-type: application/octet-stream" in normalized_artifact_headers, artifact_headers
+          assert 'content-disposition: attachment; filename="artifact"' in normalized_artifact_headers, artifact_headers
+          assert f"content-length: {len(expected_artifact)}" in normalized_artifact_headers, artifact_headers
+
           results = json.loads(machine.succeed(
               f"curl -fsS -H {auth_header_arg} ${serverUrl}/submissions/{submission_id}/results"
           ))
@@ -230,6 +273,12 @@
           assert results[0]["tests"][0]["name"] == "submitted hello.py"
           assert results[0]["tests"][0]["status"] == "passed"
 
+          result_artifacts = results[0]["result"].get("artifacts")
+          assert result_artifacts is not None, results[0]["result"]
+          assert len(result_artifacts) == 1, result_artifacts
+          assert result_artifacts[0]["path"] == "reports/summary.txt"
+          assert result_artifacts[0]["label"] == "Summary"
+
           events_body = machine.succeed(
               f"curl -fsS -H {auth_header_arg} ${serverUrl}/jobs/{job_id}/events"
           )
@@ -239,6 +288,10 @@
           assert "job.input.prepared" in event_types, event_types
           assert "executor.started" in event_types, event_types
           assert "result.read" in event_types, event_types
+          assert "artifact.discovered" in event_types, event_types
+          assert "artifact.uploaded" in event_types, event_types
+          assert "artifact.rejected" not in event_types, event_types
+          assert "artifact.upload_failed" not in event_types, event_types
 
           machine.succeed(textwrap.dedent("""
             curl -fsS -H %s ${serverUrl}/assignments/hello-python/submissions \

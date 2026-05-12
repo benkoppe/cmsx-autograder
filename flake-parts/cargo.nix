@@ -48,9 +48,9 @@
           pkgs.git
           pkgs.pkg-config
           pkgs.postgresql
-          pkgs.llvmPackages.libclang
-        ]
-        ++ lib.optionals pkgs.stdenv.isDarwin [
+        ];
+
+        buildInputs = lib.optionals pkgs.stdenv.isDarwin [
           pkgs.libiconv
         ];
       };

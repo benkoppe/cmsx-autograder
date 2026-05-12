@@ -1,14 +1,17 @@
 use std::collections::HashSet;
+use std::str::FromStr;
 
 use axum::{
     Json, Router,
     body::{Body, Bytes},
     extract::{FromRef, FromRequest, FromRequestParts, Path, Request, State},
     http::{HeaderMap, StatusCode, header, request::Parts},
-    response::Response,
-    routing::{get, post},
+    response::{IntoResponse, Response},
+    routing::{get, post, put},
 };
+use bytes::BytesMut;
 use chrono::{Duration, Utc};
+use http_body_util::BodyExt;
 use jwt_simple::prelude::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -20,12 +23,14 @@ use cmsx_core::{
     JobFailureRequest, JobResultRequest, JobStatus, ResultStatus, StartedJobRequest,
     WorkerAuthClaims, WorkerHeartbeatRequest, WorkerHeartbeatResponse, WorkerStatus,
     protocol::{
-        GRADING_RESULT_MAX_ARTIFACTS, GRADING_RESULT_MAX_TESTS, GRADING_RESULT_SCHEMA_VERSION,
-        JOB_EVENT_BATCH_MAX_EVENTS, JOB_EVENT_MESSAGE_MAX_BYTES, JOB_FAILURE_REASON_MAX_BYTES,
-        JOB_LEASE_SECONDS, JobEventStream, JobEventVisibility, MAX_CLAIM_WAIT_SECONDS,
-        WORKER_AUTH_SCHEME, WORKER_JWT_AUDIENCE, WORKER_JWT_MAX_VALIDITY_SECONDS,
-        WORKER_JWT_TIME_TOLERANCE_SECONDS, WORKER_MAX_ACTIVE_JOBS, WORKER_MAX_CLAIM_JOBS,
-        WORKER_REQUEST_NONCE_RETENTION_SECONDS,
+        ARTIFACT_MAX_BYTES, ARTIFACT_MAX_COUNT, ArtifactVisibility, GRADING_RESULT_MAX_TESTS,
+        GRADING_RESULT_SCHEMA_VERSION, JOB_EVENT_BATCH_MAX_EVENTS, JOB_EVENT_MESSAGE_MAX_BYTES,
+        JOB_FAILURE_REASON_MAX_BYTES, JOB_LEASE_SECONDS, JobEventStream, JobEventVisibility,
+        MAX_CLAIM_WAIT_SECONDS, WORKER_AUTH_SCHEME, WORKER_JWT_AUDIENCE,
+        WORKER_JWT_MAX_VALIDITY_SECONDS, WORKER_JWT_TIME_TOLERANCE_SECONDS, WORKER_MAX_ACTIVE_JOBS,
+        WORKER_MAX_CLAIM_JOBS, WORKER_REQUEST_NONCE_RETENTION_SECONDS,
+        artifact_name_from_relative_path, decode_artifact_relative_path, validate_artifact_label,
+        validate_artifact_relative_path, validate_artifact_sha256,
     },
 };
 
@@ -41,6 +46,10 @@ pub fn router() -> Router<AppState> {
         .route("/workers/jobs/{job_id}/started", post(post_started))
         .route("/workers/jobs/{job_id}/failed", post(post_failed))
         .route("/workers/jobs/{job_id}/files/{file_id}", get(get_job_file))
+        .route(
+            "/workers/jobs/{job_id}/artifacts/{artifact_id}",
+            put(put_artifact),
+        )
 }
 
 const WORKER_REQUEST_MAX_BYTES: usize = 1024 * 1024;
@@ -122,14 +131,19 @@ fn worker_token_from_headers(headers: &HeaderMap) -> Result<&str, ApiError> {
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| ApiError::unauthorized("missing worker authorization"))?;
 
-    let Some(rest) = auth_header.strip_prefix(WORKER_AUTH_SCHEME) else {
+    let Some((scheme, token)) = auth_header.split_once(' ') else {
         return Err(ApiError::unauthorized(
             "invalid worker authorization scheme",
         ));
     };
 
-    rest.strip_prefix(' ')
-        .ok_or_else(|| ApiError::unauthorized("invalid worker authorization scheme"))
+    if scheme != WORKER_AUTH_SCHEME || token.trim().is_empty() || token.contains(' ') {
+        return Err(ApiError::unauthorized(
+            "invalid worker authorization scheme",
+        ));
+    }
+
+    Ok(token)
 }
 
 async fn verify_worker_jwt(
@@ -253,6 +267,77 @@ async fn record_worker_jti(state: &AppState, worker_id: Uuid, jti: Uuid) -> Resu
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+struct ArtifactRouteError {
+    status: StatusCode,
+    code: &'static str,
+    message: String,
+}
+
+impl ArtifactRouteError {
+    fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            code,
+            message: message.into(),
+        }
+    }
+
+    fn invalid_metadata(message: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "artifact_invalid_metadata",
+            message,
+        )
+    }
+
+    fn hash_mismatch(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, "artifact_hash_mismatch", message)
+    }
+
+    fn too_large(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::PAYLOAD_TOO_LARGE, "artifact_too_large", message)
+    }
+
+    fn not_active(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::NOT_FOUND, "job_not_active", message)
+    }
+
+    fn cancellation_requested(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "job_cancellation_requested", message)
+    }
+
+    fn duplicate(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "artifact_duplicate", message)
+    }
+
+    fn conflict(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "artifact_conflict", message)
+    }
+
+    fn upload_failed(message: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "artifact_upload_failed",
+            message,
+        )
+    }
+
+    fn unauthorized(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNAUTHORIZED, "worker_unauthorized", message)
+    }
+}
+
+impl IntoResponse for ArtifactRouteError {
+    fn into_response(self) -> Response {
+        let body = Json(serde_json::json!({
+            "error": self.message,
+            "code": self.code,
+        }));
+        (self.status, body).into_response()
+    }
 }
 
 pub async fn heartbeat(
@@ -882,22 +967,25 @@ pub async fn post_result(
     validate_result_request(&value)?;
 
     let now = Utc::now();
-
-    let result_status = value.result.status.as_str();
-    let job_status = value.result.status.terminal_job_status().as_str();
-
-    let result_json = serde_json::to_value(&value.result).map_err(ApiError::internal)?;
-    let tests_json = serde_json::to_value(&value.result.tests).map_err(ApiError::internal)?;
-    let feedback = value.result.feedback.clone();
+    let claimed = JobStatus::Claimed.as_str();
+    let running = JobStatus::Running.as_str();
+    let is_cancelled_result = matches!(value.result.status, ResultStatus::Cancelled);
 
     let mut tx = state.db.begin().await.map_err(ApiError::internal)?;
 
-    let assignment_max_score = sqlx::query_scalar!(
+    let row = sqlx::query!(
         r#"
-        SELECT assignments.max_score
+        SELECT
+            grading_jobs.status,
+            grading_jobs.worker_id,
+            grading_jobs.attempts,
+            grading_jobs.lease_expires_at,
+            grading_jobs.cancel_requested_at,
+            assignments.max_score AS assignment_max_score
         FROM grading_jobs
         JOIN assignments ON assignments.id = grading_jobs.assignment_id
         WHERE grading_jobs.id = $1
+        FOR UPDATE
         "#,
         job_id
     )
@@ -906,23 +994,48 @@ pub async fn post_result(
     .map_err(ApiError::internal)?
     .ok_or_else(|| ApiError::not_found("active job not found"))?;
 
-    if value.result.max_score > assignment_max_score {
+    if row.worker_id != Some(worker.id) || row.lease_expires_at.is_none_or(|lease| lease <= now) {
+        return Err(ApiError::not_found("active job not found"));
+    }
+
+    let allowed = if row.status == running {
+        row.cancel_requested_at.is_none() || is_cancelled_result
+    } else if row.status == claimed {
+        is_cancelled_result && row.cancel_requested_at.is_some()
+    } else {
+        false
+    };
+
+    if !allowed {
+        if row.cancel_requested_at.is_some() && !is_cancelled_result {
+            return Err(ApiError::conflict("job cancellation requested"));
+        }
+
+        return Err(ApiError::not_found("active job not found"));
+    }
+
+    if value.result.max_score > row.assignment_max_score {
         return Err(ApiError::bad_request(
             "result max_score must not exceed assignment max_score",
         ));
     }
 
-    if value.result.score > assignment_max_score {
+    if value.result.score > row.assignment_max_score {
         return Err(ApiError::bad_request(
             "result score must not exceed assignment max_score",
         ));
     }
 
-    let is_cancelled_result = matches!(value.result.status, ResultStatus::Cancelled);
-    let claimed = JobStatus::Claimed.as_str();
-    let running = JobStatus::Running.as_str();
+    validate_result_artifact_refs_in_tx(&mut tx, job_id, row.attempts, &value.result.artifacts)
+        .await?;
 
-    let update = sqlx::query!(
+    let result_status = value.result.status.as_str();
+    let job_status = value.result.status.terminal_job_status().as_str();
+    let result_json = serde_json::to_value(&value.result).map_err(ApiError::internal)?;
+    let tests_json = serde_json::to_value(&value.result.tests).map_err(ApiError::internal)?;
+    let feedback = value.result.feedback.clone();
+
+    sqlx::query!(
         r#"
         UPDATE grading_jobs
         SET status = $3,
@@ -930,64 +1043,15 @@ pub async fn post_result(
             lease_expires_at = NULL
         WHERE id = $1
           AND worker_id = $2
-          AND lease_expires_at > $4
-          AND (
-            (
-                status = $6
-                AND (
-                    cancel_requested_at IS NULL
-                    OR $5
-                )
-            )
-            OR (
-                $5
-                AND status = $7
-                AND cancel_requested_at IS NOT NULL
-            )
-          )
         "#,
         job_id,
         worker.id,
         job_status,
-        now,
-        is_cancelled_result,
-        running,
-        claimed
+        now
     )
     .execute(&mut *tx)
     .await
     .map_err(ApiError::internal)?;
-
-    if update.rows_affected() != 1 {
-        if !is_cancelled_result {
-            let cancellation_requested = sqlx::query_scalar!(
-                r#"
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM grading_jobs
-                WHERE id = $1
-                  AND worker_id = $2
-                      AND status IN ($4, $5)
-                      AND lease_expires_at > $3
-                      AND cancel_requested_at IS NOT NULL
-                )
-                "#,
-                job_id,
-                worker.id,
-                now,
-                claimed,
-                running,
-            )
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(ApiError::internal)?
-            .unwrap_or(false);
-            if cancellation_requested {
-                return Err(ApiError::conflict("job cancellation requested"));
-            }
-        }
-        return Err(ApiError::not_found("active job not found"));
-    }
 
     sqlx::query!(
         r#"
@@ -1025,8 +1089,58 @@ pub async fn post_result(
     .map_err(ApiError::internal)?;
 
     tx.commit().await.map_err(ApiError::internal)?;
-
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn validate_result_artifact_refs_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    job_id: Uuid,
+    attempt: i32,
+    refs: &[cmsx_core::ResultArtifactRef],
+) -> Result<(), ApiError> {
+    if refs.len() > ARTIFACT_MAX_COUNT {
+        return Err(ApiError::bad_request("too many artifacts in result"));
+    }
+
+    let mut seen = std::collections::HashSet::new();
+
+    for artifact in refs {
+        validate_artifact_relative_path(&artifact.path)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+
+        if !seen.insert(artifact.path.clone()) {
+            return Err(ApiError::bad_request("duplicate artifact reference"));
+        }
+
+        if let Some(label) = &artifact.label {
+            cmsx_core::protocol::validate_artifact_label(label)
+                .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        }
+    }
+
+    let rows = sqlx::query_scalar!(
+        r#"
+        SELECT relative_path
+        FROM artifacts
+        WHERE job_id = $1
+          AND attempt = $2
+        "#,
+        job_id,
+        attempt
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(ApiError::internal)?;
+
+    let uploaded: std::collections::HashSet<String> = rows.into_iter().collect();
+
+    for artifact in refs {
+        if !uploaded.contains(&artifact.path) {
+            return Err(ApiError::bad_request("artifact reference was not uploaded"));
+        }
+    }
+
+    Ok(())
 }
 
 pub async fn post_failed(
@@ -1163,6 +1277,379 @@ async fn ensure_active_job_owner(
     Ok(())
 }
 
+pub async fn put_artifact(
+    State(state): State<AppState>,
+    Path((job_id, artifact_id)): Path<(Uuid, Uuid)>,
+    request: Request,
+) -> Response {
+    match put_artifact_inner(state, job_id, artifact_id, request).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+struct ArtifactMetadata {
+    relative_path: String,
+    name: String,
+    size_bytes: i64,
+    sha256: String,
+    visibility: ArtifactVisibility,
+    storage_path: String,
+}
+
+#[derive(Debug)]
+struct ActiveArtifactJob {
+    attempt: i32,
+}
+
+async fn put_artifact_inner(
+    state: AppState,
+    job_id: Uuid,
+    artifact_id: Uuid,
+    request: Request,
+) -> Result<(), ArtifactRouteError> {
+    let method = request.method().as_str().to_string();
+    let path = request.uri().path().to_string();
+    let headers = request.headers().clone();
+
+    let token = worker_token_from_headers(&headers)
+        .map_err(|_| ArtifactRouteError::unauthorized("invalid worker authorization"))?;
+
+    if let Some(content_length) = headers.get(header::CONTENT_LENGTH) {
+        let content_length = content_length
+            .to_str()
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| ArtifactRouteError::invalid_metadata("invalid content-length"))?;
+
+        if content_length > ARTIFACT_MAX_BYTES {
+            return Err(ArtifactRouteError::too_large("artifact body too large"));
+        }
+    }
+
+    let encoded_relative_path = required_header(&headers, "x-cmsx-artifact-relative-path")?;
+    let declared_size = required_header(&headers, "x-cmsx-artifact-size-bytes")?;
+    let declared_sha256 = required_header(&headers, "x-cmsx-artifact-sha256")?;
+    let visibility = required_header(&headers, "x-cmsx-artifact-visibility")?;
+
+    let body = read_artifact_body(request.into_body()).await?;
+    let body_sha256 = hex::encode(Sha256::digest(&body));
+
+    let worker = verify_worker_jwt(&state, token, &method, &path, &body_sha256)
+        .await
+        .map_err(|_| ArtifactRouteError::unauthorized("worker authentication failed"))?;
+
+    let relative_path = decode_artifact_relative_path(encoded_relative_path)
+        .map_err(|error| ArtifactRouteError::invalid_metadata(error.to_string()))?;
+
+    let name = artifact_name_from_relative_path(&relative_path)
+        .map_err(|error| ArtifactRouteError::invalid_metadata(error.to_string()))?
+        .to_string();
+
+    validate_artifact_sha256(declared_sha256)
+        .map_err(|error| ArtifactRouteError::invalid_metadata(error.to_string()))?;
+
+    if declared_sha256 != body_sha256 {
+        return Err(ArtifactRouteError::hash_mismatch(
+            "artifact sha256 mismatch",
+        ));
+    }
+
+    let size_bytes = declared_size
+        .parse::<i64>()
+        .map_err(|_| ArtifactRouteError::invalid_metadata("invalid artifact size"))?;
+
+    if size_bytes < 0 || size_bytes as usize != body.len() {
+        return Err(ArtifactRouteError::invalid_metadata(
+            "artifact size does not match body length",
+        ));
+    }
+
+    let visibility = ArtifactVisibility::from_str(visibility)
+        .map_err(|error| ArtifactRouteError::invalid_metadata(error.to_string()))?;
+
+    let active = load_active_artifact_job(&state, worker.id, job_id).await?;
+    let storage_path =
+        state
+            .storage
+            .artifact_key(job_id, active.attempt, artifact_id, declared_sha256);
+
+    let metadata = ArtifactMetadata {
+        relative_path,
+        name,
+        size_bytes,
+        sha256: declared_sha256.to_string(),
+        visibility,
+        storage_path,
+    };
+
+    if let Some(outcome) =
+        artifact_preflight(&state, job_id, artifact_id, active.attempt, &metadata).await?
+    {
+        return outcome;
+    }
+
+    state
+        .storage
+        .put_artifact_bytes(job_id, active.attempt, artifact_id, &metadata.sha256, body)
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                %job_id,
+                %artifact_id,
+                attempt = active.attempt,
+                path = %metadata.relative_path,
+                storage_path = %metadata.storage_path,
+                ?error,
+                "artifact storage upload failed"
+            );
+            ArtifactRouteError::upload_failed("artifact storage upload failed")
+        })?;
+
+    insert_artifact_after_upload(
+        &state,
+        worker.id,
+        job_id,
+        artifact_id,
+        active.attempt,
+        &metadata,
+    )
+    .await
+}
+
+async fn read_artifact_body(mut body: Body) -> Result<Bytes, ArtifactRouteError> {
+    let mut bytes = BytesMut::new();
+    let limit = ARTIFACT_MAX_BYTES as usize;
+
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|error| {
+            ArtifactRouteError::upload_failed(format!("failed to read artifact body: {error}"))
+        })?;
+
+        let Some(data) = frame.data_ref() else {
+            continue;
+        };
+
+        if bytes.len().saturating_add(data.len()) > limit {
+            return Err(ArtifactRouteError::too_large("artifact body too large"));
+        }
+
+        bytes.extend_from_slice(data);
+    }
+
+    Ok(bytes.freeze())
+}
+
+fn required_header<'a>(
+    headers: &'a HeaderMap,
+    name: &'static str,
+) -> Result<&'a str, ArtifactRouteError> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| ArtifactRouteError::invalid_metadata("missing {name} header"))
+}
+
+async fn load_active_artifact_job(
+    state: &AppState,
+    worker_id: Uuid,
+    job_id: Uuid,
+) -> Result<ActiveArtifactJob, ArtifactRouteError> {
+    let now = Utc::now();
+    let claimed = JobStatus::Claimed.as_str();
+    let running = JobStatus::Running.as_str();
+
+    let row = sqlx::query!(
+        r#"
+        SELECT status, worker_id, attempts, lease_expires_at, cancel_requested_at
+        FROM grading_jobs
+        WHERE id = $1
+        "#,
+        job_id
+    )
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|error| {
+        tracing::warn!(%job_id, ?error, "failed to load artifact upload job state");
+        ArtifactRouteError::upload_failed("failed to load artifact upload job state")
+    })?
+    .ok_or_else(|| ArtifactRouteError::not_active("job is not active"))?;
+
+    if row.worker_id != Some(worker_id)
+        || (row.status != claimed && row.status != running)
+        || row.lease_expires_at.is_none_or(|lease| lease <= now)
+    {
+        return Err(ArtifactRouteError::not_active("job is not active"));
+    }
+
+    if row.cancel_requested_at.is_some() {
+        return Err(ArtifactRouteError::cancellation_requested(
+            "job cancellation requested",
+        ));
+    }
+
+    Ok(ActiveArtifactJob {
+        attempt: row.attempts,
+    })
+}
+
+enum ExistingArtifactOutcome {
+    Success,
+    Conflict(ArtifactRouteError),
+}
+
+async fn artifact_preflight(
+    state: &AppState,
+    job_id: Uuid,
+    artifact_id: Uuid,
+    attempt: i32,
+    metadata: &ArtifactMetadata,
+) -> Result<Option<Result<(), ArtifactRouteError>>, ArtifactRouteError> {
+    match classify_existing_artifact(state, job_id, artifact_id, attempt, metadata).await? {
+        Some(ExistingArtifactOutcome::Success) => Ok(Some(Ok(()))),
+        Some(ExistingArtifactOutcome::Conflict(error)) => Ok(Some(Err(error))),
+        None => Ok(None),
+    }
+}
+
+async fn classify_existing_artifact(
+    state: &AppState,
+    job_id: Uuid,
+    artifact_id: Uuid,
+    attempt: i32,
+    metadata: &ArtifactMetadata,
+) -> Result<Option<ExistingArtifactOutcome>, ArtifactRouteError> {
+    let by_id = sqlx::query!(
+        r#"
+        SELECT job_id, attempt, relative_path, name, storage_path, content_type, size_bytes, sha256, visibility
+        FROM artifacts
+        WHERE id = $1
+        "#,
+        artifact_id
+    )
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|error| {
+        tracing::warn!(%job_id, %artifact_id, ?error, "failed checking existing artifact id");
+        ArtifactRouteError::upload_failed("failed checking existing artifact")
+    })?;
+
+    if let Some(row) = by_id {
+        let identical = row.job_id == job_id
+            && row.attempt == attempt
+            && row.relative_path == metadata.relative_path
+            && row.name == metadata.name
+            && row.storage_path == metadata.storage_path
+            && row.content_type.is_none()
+            && row.size_bytes == metadata.size_bytes
+            && row.sha256 == metadata.sha256
+            && row.visibility == metadata.visibility.as_str();
+
+        if identical {
+            return Ok(Some(ExistingArtifactOutcome::Success));
+        }
+
+        return Ok(Some(ExistingArtifactOutcome::Conflict(
+            ArtifactRouteError::conflict("artifact id conflicts with existing artifact"),
+        )));
+    }
+
+    let by_path = sqlx::query_scalar!(
+        r#"
+        SELECT id
+        FROM artifacts
+        WHERE job_id = $1
+          AND attempt = $2
+          AND relative_path = $3
+        "#,
+        job_id,
+        attempt,
+        metadata.relative_path
+    )
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|error| {
+        tracing::warn!(%job_id, %artifact_id, ?error, "failed checking existing artifact path");
+        ArtifactRouteError::upload_failed("failed checking existing artifact")
+    })?;
+
+    if by_path.is_some() {
+        return Ok(Some(ExistingArtifactOutcome::Conflict(
+            ArtifactRouteError::duplicate("artifact relative path already exists"),
+        )));
+    }
+
+    Ok(None)
+}
+
+async fn insert_artifact_after_upload(
+    state: &AppState,
+    worker_id: Uuid,
+    job_id: Uuid,
+    artifact_id: Uuid,
+    attempt: i32,
+    metadata: &ArtifactMetadata,
+) -> Result<(), ArtifactRouteError> {
+    let active = load_active_artifact_job(state, worker_id, job_id).await?;
+
+    if active.attempt != attempt {
+        return Err(ArtifactRouteError::not_active("job attempt changed"));
+    }
+
+    if let Some(outcome) = artifact_preflight(state, job_id, artifact_id, attempt, metadata).await?
+    {
+        return outcome;
+    }
+
+    let insert = sqlx::query!(
+        r#"
+        INSERT INTO artifacts (
+            id,
+            job_id,
+            attempt,
+            relative_path,
+            name,
+            storage_path,
+            content_type,
+            size_bytes,
+            sha256,
+            visibility,
+            created_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, $8, $9, $10)
+        "#,
+        artifact_id,
+        job_id,
+        attempt,
+        metadata.relative_path,
+        metadata.name,
+        metadata.storage_path,
+        metadata.size_bytes,
+        metadata.sha256,
+        metadata.visibility.as_str(),
+        Utc::now()
+    )
+    .execute(&state.db)
+    .await;
+
+    match insert {
+        Ok(_) => Ok(()),
+        Err(error) if db::is_unique_violation(&error) => {
+            match classify_existing_artifact(state, job_id, artifact_id, attempt, metadata).await? {
+                Some(ExistingArtifactOutcome::Success) => Ok(()),
+                Some(ExistingArtifactOutcome::Conflict(error)) => Err(error),
+                None => Err(ArtifactRouteError::conflict("artifact unique conflict")),
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%job_id, %artifact_id, ?error, "failed inserting artifact row");
+            Err(ArtifactRouteError::upload_failed(
+                "failed inserting artifact row",
+            ))
+        }
+    }
+}
+
 fn validate_heartbeat_request(value: &WorkerHeartbeatRequest) -> Result<(), ApiError> {
     if value.running_jobs < 0 {
         return Err(ApiError::bad_request("running_jobs must be nonnegative"));
@@ -1266,7 +1753,7 @@ fn validate_result_request(value: &JobResultRequest) -> Result<(), ApiError> {
     if value.result.tests.len() > GRADING_RESULT_MAX_TESTS {
         return Err(ApiError::bad_request("too many tests in result"));
     }
-    if value.result.artifacts.len() > GRADING_RESULT_MAX_ARTIFACTS {
+    if value.result.artifacts.len() > ARTIFACT_MAX_COUNT {
         return Err(ApiError::bad_request("too many artifacts in result"));
     }
     if let Some(feedback) = &value.result.feedback
@@ -1304,6 +1791,22 @@ fn validate_result_request(value: &JobResultRequest) -> Result<(), ApiError> {
             return Err(ApiError::bad_request(
                 "test score must not exceed max_score",
             ));
+        }
+    }
+
+    let mut artifact_paths = HashSet::new();
+
+    for artifact in &value.result.artifacts {
+        validate_artifact_relative_path(&artifact.path)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+
+        if !artifact_paths.insert(artifact.path.as_str()) {
+            return Err(ApiError::bad_request("duplicate artifact reference"));
+        }
+
+        if let Some(label) = &artifact.label {
+            validate_artifact_label(label)
+                .map_err(|error| ApiError::bad_request(error.to_string()))?;
         }
     }
 
